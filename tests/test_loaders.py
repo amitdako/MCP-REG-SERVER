@@ -27,6 +27,7 @@ def test_directory_scan_skips_included_files_and_noise_dirs(tmp_path):
     write(tmp_path / ".github/ISSUE_TEMPLATE.md", "# template\n")
     write(tmp_path / "docs/notes.md", "# Notes\n")
     write(tmp_path / "docs/image.png", "not text")
+    write(tmp_path / "requirements.txt", "psycopg==3")  # not documentation
 
     found = {p.relative_to(tmp_path).as_posix() for p in loaders.scan_directory(tmp_path)}
 

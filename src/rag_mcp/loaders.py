@@ -24,7 +24,11 @@ from rag_mcp.document import DocFormat, format_for_path
 
 log = logging.getLogger(__name__)
 
+# Explicitly given files may be any text format; directory/repo scans take only
+# documentation markup (the task: "the Markdown and RST content"), so files like
+# requirements.txt or robots.txt in a repo are not ingested as documents.
 TEXT_EXTENSIONS = {".md", ".markdown", ".mdx", ".rst", ".txt", ".text"}
+DOC_EXTENSIONS = {".md", ".markdown", ".mdx", ".rst"}
 SKIP_DIRS = {".git", ".github", "node_modules", "_build", ".venv", "__pycache__"}
 MAX_DOCUMENT_BYTES = 5 * 1024 * 1024  # a single doc bigger than this is almost surely not docs
 HTTP_TIMEOUT_S = 30
@@ -113,7 +117,7 @@ def scan_directory(scan_root: Path, include_root: Path | None = None) -> list[Pa
     include_root = include_root or scan_root
     files = sorted(
         p for p in scan_root.rglob("*")
-        if p.is_file() and p.suffix.lower() in TEXT_EXTENSIONS
+        if p.is_file() and p.suffix.lower() in DOC_EXTENSIONS
         and not SKIP_DIRS & set(p.relative_to(scan_root).parts)
     )
     included: set[Path] = set()

@@ -129,15 +129,37 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 
 | Decision | Why | What we give up |
 |---|---|---|
-| **Hybrid search: vector top-30 + full-text top-30, fused with RRF (k=60)**, return top-k (default 5) | Test questions target exact tokens (parameter names, limits) where vector-only fails; RRF needs no score calibration | Two queries per search (still ms-level) |
-| Optional `source_prefix` filter (e.g. `docs/products/kafka`) | Cheap metadata filter; helps Claude narrow ambiguous questions | — |
-| Results return `content`, `source_uri`, docs URL, `heading_path`, scores | Claude can cite precisely; scores help debugging | Slightly larger tool responses |
-| No reranker model in v1 | Adds latency + another model; hybrid gets most of the gain | Some precision left on the table (listed as "next level") |
+| **Hybrid search: vector top-30 + keyword top-30, fused with RRF (k=60)** | Test questions target exact tokens (parameter names, limits) where vectors are fuzzy; RRF needs no score calibration | Two retrievers per query (still ~100 ms warm) |
+| Keyword query: **drop stopwords, match each term separately (OR)**; identifiers Postgres splits (`max_connections`) matched as an **exact phrase**; dotted names stay one token | Measured: `websearch_to_tsquery` ANDs every word ("how & many & can & …") → natural-language questions would almost never match | No stemming (vector side covers paraphrases) |
+| **Keyword ranking = BM25-style IDF** (chosen with Amit): score = Σ log(1 + (N − df + .5)/(df + .5)) over matched terms; df per term via the GIN index, computed per query | Found on real data: `ts_rank` has no IDF, so pages repeating "Aiven PostgreSQL" beat the one chunk with `tcp_keepalives_idle` (correct page came **5th → 1st** after the fix) | No term-frequency saturation / length normalisation (not full BM25); df counting costs O(matches) per term — a scale hotspot (precomputed term stats or a BM25 index at 100×) |
+| Plain RRF kept; **identifier boost decided by the eval in step 5** (chosen with Amit) | A synthetic test showed RRF lets "decent on both sides" beat "#1 on keyword only"; on real data the case worked. Decide with numbers, not one example | — |
+| Each retriever takes its top-N in a subquery, ranks outside | A window function around `ORDER BY … LIMIT` forces scoring every row and **bypasses HNSW** | — |
+| `source_filter` = case-insensitive substring of `source_uri`; with a filter, `hnsw.iterative_scan = relaxed_order` (pgvector 0.8) | Filtered HNSW scans otherwise run out of candidates before the LIMIT | — |
+| **Results as readable Markdown** (chosen with Amit): `[n] Page > Section`, `source:` URL, score line (vector #, keyword #), chunk text | LLMs read it naturally; citations obvious; the score line makes retrieval debuggable | Not machine-structured |
+| **Default 5 results** (chosen with Amit), `top_k` 1–20 | ~1,500 tokens per search; Claude can search again | Broad questions may need a second call |
+| No reranker model in v1 | Adds latency + another model; hybrid gets most of the gain | Precision left on the table ("next level") |
 
 ### 3.8 MCP server & runtime
 
 | Decision | Why | What we give up |
 |---|---|---|
+| Python + official `mcp` SDK **2.x** (`MCPServer`, formerly FastMCP), stdio transport | Required transport; verified the v2 API in the installed package rather than assuming v1 | — |
+| Tools: `ingest`, `ingest_status`, `search`, `list_sources`, `delete_source`, with annotations (read-only / destructive / idempotent / open-world) | Required three + status for background jobs + delete for the "content changes" story; annotations let clients reason about safety | — |
+| Server `instructions`: search before answering, cite the source URL, one search per sub-question, say so when nothing is found | Steers Claude toward grounded, cited answers | — |
+| Tool functions are synchronous; the SDK runs them in worker threads | A slow search/ingest never blocks the protocol loop | — |
+| Bad input → `ToolError` with an actionable message (e.g. "mount files under ./data and use /data/...") | Claude sees `isError` and can correct itself | — |
+| **`list_sources` = totals + running jobs + filtered, paged rows** (chosen with Amit; default 50, max 200) | The full repo would be ~25k tokens in one response | Need `filter`/`offset` to see everything |
+| `delete_source` by exact URI only | Prevents accidental bulk deletes; repo re-ingest handles bulk removal via sync | No "delete everything under a prefix" tool |
+| **All logs to stderr**; stdout reserved for the protocol; HF progress bars disabled | Any stdout write corrupts MCP stdio (verified: raw stdout is pure JSON-RPC) | — |
+| `docker compose up -d` starts Postgres; server service under a compose **profile**; MCP config runs `docker compose -f <path> run --rm -T mcp-server` | With stdio, Claude **spawns** the server — a long-running compose service doesn't fit | Container + Python start on each Claude session |
+| **Handshake first, model in the background; tools wait for the model** (chosen with Amit: wait, don't fail) | Importing torch takes ~10 s; blocking the handshake risks a client startup timeout | The first search of a session takes ~14 s |
+| Directory/repo scans ingest only `.md/.markdown/.mdx/.rst`; an explicit single file may also be `.txt` | The task says "the Markdown and RST content"; `requirements.txt`/`robots.txt` were noise (removed by sync: 3 deleted) | — |
+| `mcp-server` waits on `db` healthcheck (`pg_isready`) | Avoids connection-failure cascades on startup | — |
+| DB exposed only on `127.0.0.1:5433` | Avoids clashing with a local Postgres on 5432; not reachable from the network | — |
+| Separate `rag_test` database for the test suite | Running tests never wipes ingested data | — |
+| Model loaded once per process, reused across calls | Avoids per-request load cost | Memory held for the session |
+
+---|---|---|
 | Python + official `mcp` SDK, stdio transport | Required transport; Python has the best embedding/pgvector ecosystem | — |
 | Tools: `ingest`, `search`, `list_sources`, `delete_source` | Required three + delete (cheap, supports the "content changes" story) | — |
 | **All logs to stderr**; stdout reserved for the protocol | Any stdout write corrupts MCP stdio | — |
@@ -159,8 +181,8 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
   (incl. breadcrumb), overlap only within a split section.
 - **Ingest (done):** loaders (includes, HTML, GitHub URLs, local HTTP server), idempotency, atomic replace, sync + no-sync-after-failure, background jobs, real-model embedder. Same content → no re-embed; changed content → chunks replaced atomically;
   delete cascades.
-- **Search:** hybrid finds an exact parameter name that vector-only misses; prefix filter works.
-- **Integration:** MCP tools end to end against a real pgvector container.
+- **Search (done):** stopword/identifier term extraction, IDF regression (rare identifier is keyword #1), parameter question finds the parameter page, semantic question without shared keywords, source filter, citation format, empty index message.
+- **Integration (done):** the real server spawned over stdio with the MCP client: tool list, ingest/unchanged, search with citation, list_sources, input errors as `isError`, delete, background directory job via `ingest_status`.
 - **Retrieval eval:** ~25 questions with known source pages → recall@5 / MRR (also feeds the deck).
 - **Load benchmark:** ingest throughput, p50/p95 search latency, concurrent queries — real numbers
   for the "Load" and "Where it breaks" slides.
@@ -198,6 +220,8 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 | **Full devportal ingest from GitHub (CLI)** | **688 s (11.5 min)**: 817 files → 817 sources, **2,910 chunks**, 762k tokens, **0 failures** | Clone + chunk + embed + write |
 | **Re-ingest, nothing changed** | **12 s**, 817 × `unchanged`, 0 chunks written | Clone + hash only: the hash check works at scale |
 | Database size after full ingest | 28 MB (incl. HNSW + GIN indexes) | Far from any Postgres limit |
+| **Server over real `docker compose run -T` stdio** | handshake **7.9 s** (container start); first search **14.4 s** (waits for model load); then **~0.1 s** per search | Measured with a raw JSON-RPC probe against the full corpus |
+| Re-ingest after restricting scans to MD/RST | 13 s: 814 unchanged, **3 `.txt` sources deleted by sync** → 814 sources, 2,907 chunks | Sync verified on real data |
 | Query embedding latency | **141 ms** | Search will be dominated by this, not the DB |
 | Biggest single source | `cassandra-metrics-prometheus.rst` → 181 chunks (6% of corpus) | A list of metric names; legit but dilutes top-k |
 
@@ -218,6 +242,6 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 1. ~~Project skeleton, Dockerfile, docker-compose, schema~~ ✅
 2. ~~RST/MD parser + chunker + tests~~ ✅
 3. ~~Embedder, ingest pipeline, idempotency, background jobs~~ ✅
-4. Hybrid search + MCP tools
+4. ~~Hybrid search + MCP tools~~ ✅
 5. Eval set + load benchmark
 6. README, then slide deck

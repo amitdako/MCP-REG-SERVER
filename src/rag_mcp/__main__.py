@@ -24,6 +24,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="rag_mcp")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("serve", help="run the MCP server over stdio (what Claude Code launches)")
     sub.add_parser("init-db", help="create the database schema (also done on server start)")
     ingest = sub.add_parser("ingest", help="ingest a file, directory or URL synchronously (no time limit)")
     ingest.add_argument("source", help="path inside the container (e.g. /data/x.md), URL, or GitHub repo URL")
@@ -36,6 +37,11 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    if args.command == "serve":
+        from rag_mcp.server import serve
+
+        serve(settings)
+        return 0
     db.ensure_schema(settings.database_url, settings.embedding_dim)
     if args.command == "ingest":
         return _ingest(settings, args.source)

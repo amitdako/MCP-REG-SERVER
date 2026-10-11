@@ -61,7 +61,9 @@ class SentenceTransformerEmbedder:
     def _load(self) -> None:
         try:
             from sentence_transformers import SentenceTransformer
+            from transformers.utils import logging as hf_logging
 
+            hf_logging.disable_progress_bar()  # "Loading weights" bars: noise in the server log
             model = SentenceTransformer(self.model_name, device="cpu")
             actual = model.get_embedding_dimension()
             if actual != self.dim:
