@@ -61,18 +61,26 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 | Own lightweight RST heading parser instead of full `docutils` rendering | Sphinx-specific directives (`grid`, `dropdown`, `mermaid`, `:doc:`) make docutils error out or need Sphinx itself; we only need headings + clean text | Not a full RST implementation; edge cases handled heuristically |
 | Heading = text line + underline of one repeated punctuation char, length ≥ 3, **no spaces**; overline variant supported; level = order of first appearance of each style | That's how RST defines levels; "no spaces" prevents simple-table borders (`====  ====`) being read as headings; lenient length tolerates the repo's sloppy underlines | Rare false positives on unusual text |
 | Markdown: ATX headers (`#`…`######`); `####`+ fold into parent breadcrumb depth | Covers the `.md` files and arbitrary user uploads | No Setext-style MD headings (rare) |
-| Keep `code`/`code-block`/tables as text; drop `image`, `tableofcontents`, `raw`; strip roles like `` :doc:`text <link>` `` → `text` | Commands and parameter values live in code/tables; markup noise hurts both embeddings and keyword matching | Images/diagrams are not searchable |
+| Keep `code`/`code-block` as fenced code (verbatim, no markup cleanup); drop `image`, `figure`, `toctree`, `tableofcontents`, `raw`, `mermaid`, `literalinclude`; strip roles like `` :doc:`text <link>` `` → `text`; ` ``x`` ` → `` `x` `` | Commands and parameter values live in code/tables; markup noise hurts both embeddings and keyword matching | Images/diagrams and `literalinclude`d code files are not searchable |
+| **Tables: light cleanup** (chosen with Amit) — drop grid/simple-table border lines and `:widths:`-style options, keep cell text as written | Borders like `+-----+` burn tokens and add noise; cell text is where defaults live (`tcp_keepalives_idle` = 180) | Rows are not rewritten as standalone facts (alternative: "Header: value" rows — more code, more bug risk) |
+| Admonitions/containers (`note`, `warning`, `dropdown`, `grid`, `list-table`, ...) keep their content, with a short label (`Note: ...`) | Limits and caveats often live inside notes | — |
+| Substitutions (`.. \|name\| replace:: ...`) resolved; comments, labels (`.. _x:`), `:orphan:` dropped | `\|mysql_max_connections\|` would otherwise be an opaque token | Footnotes (`.. [1]`) are dropped with comments (rare in this corpus) |
 | Page title = first top-level heading (front of every breadcrumb) | Chunks from different products look alike ("Prerequisites") — the title disambiguates | — |
 
 ### 3.3 Chunking
 
 | Decision | Why | What we give up |
 |---|---|---|
-| **Structure-aware, token-based** chunking using the embedding model's own tokenizer (target 350 / max 450 / overlap 50 tokens) | Sizes are exact for the model, not approximations from characters | Slightly slower than char splitting |
-| Overlap only when a **single long section** is split; never across sections | Section boundaries are natural semantic breaks; overlap there just duplicates | — |
-| **Merge consecutive small sibling sections** up to target size; each keeps its heading line in `content`; never merge across a parent boundary | Avoids thousands of ~30-token chunks (config params) that embed poorly; keeps parameter names searchable | Breadcrumb of a merged chunk is the shared parent, not each param |
-| **Breadcrumb injected only into `embedding_input`** (e.g. `[Kafka advanced parameters > kafka]`), `content` stays clean | Richer vectors without polluting what Claude reads | Two text columns per chunk (storage) |
-| Token budget **includes the breadcrumb** (max 450 + breadcrumb < 512) | bge-small truncates at 512 tokens — anything beyond is silently not embedded | Slightly smaller content per chunk |
+| **Structure-aware, token-based** chunking using the embedding model's own tokenizer; **target 350 / max 450 / overlap 50 tokens** (chosen with Amit; configurable, to be tuned with the eval set in step 5) | Sizes are exact for the model, not approximations from characters; 350 is enough context for how-to steps | Slightly slower than char splitting |
+| **Pack whole subtrees of siblings** (chosen with Amit): a section whose whole subtree fits in 350 tokens is one unit; consecutive sibling units (plus the parent's intro) are packed up to 350; a big subtree is chunked internally and is never packed with its neighbours | Avoids thousands of ~30-token chunks (config params) that embed poorly, while never mixing text from unrelated parents (e.g. `private_access.*` stays together) | A chunk can hold ~8 parameters, so a hit is less pinpointed than one-param-per-chunk |
+| Breadcrumb = **deepest path that covers all text in the chunk**; a heading with no text under it produces no chunk | A one-page document gets `[Page]`, a packed `private_access` subtree gets `[Page > private_access]` | — |
+| Long sections split on paragraphs → lines → token windows; **each piece repeats the section heading** | Readable pieces; Claude sees which section a piece belongs to | A few tokens per piece |
+| Overlap = trailing whole paragraphs up to 50 tokens, or **the last ~50 tokens of the previous paragraph** (cut at a word boundary) when no whole paragraph fits | Found by a test: real paragraphs are often >50 tokens, so whole-paragraph-only overlap was usually zero | Duplicate text between neighbouring pieces |
+| Code fences re-balanced when a code block is cut between pieces | Every chunk renders as valid Markdown | — |
+| **Breadcrumb injected only into `embedding_input`** (e.g. `[Kafka advanced parameters > private_access]`), `content` stays clean | Richer vectors without polluting what Claude reads | Two text columns per chunk (storage) |
+| Breadcrumb capped at 48 tokens by dropping middle levels (`[Page > ... > Leaf]`); full path still stored in `heading_path` | Deep pages with long titles must still fit the model | Middle levels missing from the embedded text in rare cases |
+| Hard guarantee: breadcrumb + content ≤ 510 tokens (512 − [CLS]/[SEP]); config validated at startup | bge-small truncates at 512 tokens — anything beyond is silently not embedded | — |
+| `CHUNKER_VERSION` constant, part of the content hash | Changing chunking logic forces re-chunking on the next ingest | Must remember to bump it |
 
 ### 3.4 Embeddings
 
@@ -136,7 +144,7 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 
 - **Schema (done):** idempotent creation, dimension mismatch fails loudly, cascade delete,
   duplicate chunk/URI rejected, source type CHECK, full-text matches identifiers exactly.
-- **Chunker/parser (highest priority):** RST heading levels, table borders not treated as headings,
+- **Chunker/parser (done, 28 tests):** RST heading levels, table borders not treated as headings,
   sloppy underlines, include resolution, small-section merging, token limits never exceeded
   (incl. breadcrumb), overlap only within a split section.
 - **Idempotency:** same content → no re-embed; changed content → chunks replaced atomically;
@@ -172,6 +180,11 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 | Python import of torch + sentence-transformers | ~10 s | Why the server must answer the handshake before loading |
 | Model load (bge-small, from baked cache) | 0.5 s | |
 | Embed 64 short texts (CPU) | 0.3–0.8 s | Real chunk throughput measured in step 5 |
+| Whole devportal repo, chunked (no embedding) | 814 files → **2,907 chunks**, 762k tokens | `includes/` inlined into parent pages |
+| Tokens per chunk | p5 58 · p50 286 · p95 389 · **max 485** (limit 510) | Limit holds on the real corpus |
+| Files with no chunks | 20 | All navigation-only pages (title + `tableofcontents`) |
+| Chunking time, whole repo | 46 s | Dominated by repeated token counting; optimisation candidate |
+| Biggest single source | `cassandra-metrics-prometheus.rst` → 181 chunks (6% of corpus) | A list of metric names; legit but dilutes top-k |
 
 ---
 
@@ -188,7 +201,7 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 ## 8. Build plan
 
 1. ~~Project skeleton, Dockerfile, docker-compose, schema~~ ✅
-2. RST/MD parser + chunker + tests
+2. ~~RST/MD parser + chunker + tests~~ ✅
 3. Embedder, ingest pipeline, idempotency
 4. Hybrid search + MCP tools
 5. Eval set + load benchmark
