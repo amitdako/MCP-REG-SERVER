@@ -47,12 +47,17 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 
 | Decision | Why | What we give up |
 |---|---|---|
-| `ingest` accepts text, file path, directory, URL, and GitHub repo URL (shallow `git clone`) | Lets Claude ingest the whole repo with one call: `ingest("https://github.com/aiven/devportal")` | Needs `git` in the image |
-| A directory/repo expands into **one `file` source per document** | `list_sources`/`delete_source`/idempotency stay per-page; citations are per-page | More rows in `sources` (fine at ~850) |
-| Also a **CLI command** (`docker compose run --rm mcp-server ingest <path\|url>`) | Initial bulk load can exceed an MCP tool-call timeout; the CLI has no timeout | Two entry points (same code path underneath) |
-| Resolve `.. include::` **inline into the parent page**; skip `includes/` as standalone sources | Parameters are cited under the real page (`kafka/reference/advanced-params.rst`); no duplicate chunks stealing top-k slots | Content included in several pages is stored once per page that includes it |
-| `source_uri` = repo-relative path (+ derived public docs URL for devportal) | Container paths like `/tmp/clone/...` mean nothing to the user | URL derivation is devportal-specific (falls back to path) |
-| Embed in batches (≈64) and bulk-insert chunks | Ingest throughput is dominated by embedding; batching is the cheap win | Higher peak memory during ingest |
+| `ingest` takes exactly one of `text` / `path` / `url`; a URL may be a web page, a raw `.md`/`.rst`/`.txt` file, a GitHub repo (shallow `git clone`), a repo subfolder (`/tree/main/docs/...`) or a single GitHub file (`/blob/...`) | Lets Claude ingest the whole repo with one call: `ingest(url="https://github.com/aiven/devportal")` | Needs `git` in the image |
+| A directory/repo expands into **one `file` source per document** | `list_sources`/`delete_source`/idempotency stay per-page; citations are per-page | More rows in `sources` (fine at ~800) |
+| **Big inputs (directory/repo) run as a background job** (chosen with Amit): `ingest` returns a job id at once, an `ingest_status` tool reports progress + ETA; one worker thread; each document is committed separately, so docs become searchable progressively | Measured: whole repo ≈ 12 min (embedding ~4.4 chunks/s) — too long to block a tool call | Jobs live in memory: lost if the server exits (re-running resumes cheaply via the hash) |
+| Also a **CLI command** (`docker compose run --rm -T mcp-server ingest <path\|url>`), synchronous | Bulk load without depending on a Claude session staying open | Two entry points (same pipeline underneath) |
+| Resolve `.. include::` **inline into the parent page**; a file that another file includes is **not a standalone source** (detected by scanning includes, not by folder name) | Parameters are cited under the real page (`kafka/reference/advanced-params.rst`); no duplicate chunks; works for any Sphinx repo | Content included by several pages is stored once per including page |
+| **Repo file `source_uri` = GitHub blob URL** (chosen with Amit), e.g. `https://github.com/aiven/devportal/blob/main/docs/...rst`; repo-relative path kept in `metadata.path` | Unique across repos and always a valid, clickable citation | Long URIs; filtering by substring (`products/kafka`) |
+| Local files: absolute path in the container (`/data/...`); text: `text:<name>` (or `text:<sha256 prefix>` without a name) | Stable identity, so re-ingesting the same input replaces it | — |
+| **HTML pages → Markdown** (chosen with Amit): BeautifulSoup drops nav/header/footer/scripts, `markdownify` keeps h1–h6, lists, tables, code; page `<title>` becomes the source title | The structure-aware chunker keeps working (breadcrumbs from HTML headings) | Two small deps (bs4, markdownify); JS-rendered pages are not executed |
+| **Re-ingesting a directory/repo syncs it**: sources under its URI prefix that no longer exist are deleted — **only after a complete walk with zero failures** | "Content changes frequently" story: deletions upstream propagate | A run with any failure leaves vanished sources in place (reported as `sync_skipped`) |
+| Limits: 5 MB per document, 30 s HTTP timeout, 5 min clone timeout, `GIT_TERMINAL_PROMPT=0`, only `http(s)` URLs | A bad input must fail fast with a clear message, never hang | Very large single files are rejected |
+| Embedding batch size **16** (`INGEST_BATCH_SIZE`) | Measured: 32/64 are no faster on CPU; small batches mean a search waits at most one batch (~3.5 s) behind a running ingest | — |
 
 ### 3.2 Parsing (RST-first)
 
@@ -90,6 +95,8 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 | Query prefix `"Represent this sentence for searching relevant passages: "` on queries only | Required by bge for asymmetric retrieval | — |
 | Model **downloaded at `docker build`** time, then `HF_HUB_OFFLINE=1`; CPU-only PyTorch wheel | No network on first run, no API key (verified: loads with `--network none`); image stays lean without CUDA | Bigger image than a no-model image; rebuild to change model |
 | Normalized embeddings + cosine distance | Standard for bge; makes scores comparable | — |
+| **Keep PyTorch for now** (chosen with Amit) instead of ONNX Runtime / int8 | No new risk mid-project; measured throughput (4.4 chunks/s) is acceptable with background jobs | ONNX int8 would likely be 2–3× faster and ~700 MB smaller — top "next level" item |
+| Model loads in a **background thread**; all model calls serialized by a lock | Handshake isn't blocked by the ~10 s import; CPU is the bottleneck, so parallel encode calls only slow each other | A search can wait behind one ingest batch |
 | (Optional) hosted provider via env var — **not planned for v1** | Not required; keeps dependencies minimal | — |
 
 ### 3.5 Storage & schema
@@ -114,6 +121,9 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 | Unchanged (`source_uri`, hash) → return early, no embedding | Re-ingesting the whole repo is near-free | — |
 | Changed → delete old chunks + insert new in **one transaction** | Readers never see a half-updated source | Brief lock on that source's rows |
 | Upsert on `UNIQUE(source_uri)` (+ per-source advisory lock) | Two concurrent ingests of the same URI can't race into duplicates | — |
+| Parse/chunk/embed happen **before** the transaction; the transaction only does lock → upsert → delete → insert | No DB locks held during minutes of CPU work | Two concurrent ingests of one URI both do the embedding work (last write wins) |
+| A document with no text (navigation page) is still recorded, with `chunk_count = 0` | Shows up in `list_sources` and is skipped by hash next time | — |
+| One failing document never aborts a collection; errors (first 20) are reported per job | An 800-file ingest shouldn't die on one bad file | — |
 
 ### 3.7 Retrieval (search)
 
@@ -147,7 +157,7 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 - **Chunker/parser (done, 28 tests):** RST heading levels, table borders not treated as headings,
   sloppy underlines, include resolution, small-section merging, token limits never exceeded
   (incl. breadcrumb), overlap only within a split section.
-- **Idempotency:** same content → no re-embed; changed content → chunks replaced atomically;
+- **Ingest (done):** loaders (includes, HTML, GitHub URLs, local HTTP server), idempotency, atomic replace, sync + no-sync-after-failure, background jobs, real-model embedder. Same content → no re-embed; changed content → chunks replaced atomically;
   delete cascades.
 - **Search:** hybrid finds an exact parameter name that vector-only misses; prefix filter works.
 - **Integration:** MCP tools end to end against a real pgvector container.
@@ -184,6 +194,11 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 | Tokens per chunk | p5 58 · p50 286 · p95 389 · **max 485** (limit 510) | Limit holds on the real corpus |
 | Files with no chunks | 20 | All navigation-only pages (title + `tableofcontents`) |
 | Chunking time, whole repo | 46 s | Dominated by repeated token counting; optimisation candidate |
+| Embedding throughput (real chunks, CPU, batch 16–64) | **~4.4 chunks/s**; 4 vs 8 threads no difference | → full repo ≈ 11 min of embedding |
+| **Full devportal ingest from GitHub (CLI)** | **688 s (11.5 min)**: 817 files → 817 sources, **2,910 chunks**, 762k tokens, **0 failures** | Clone + chunk + embed + write |
+| **Re-ingest, nothing changed** | **12 s**, 817 × `unchanged`, 0 chunks written | Clone + hash only: the hash check works at scale |
+| Database size after full ingest | 28 MB (incl. HNSW + GIN indexes) | Far from any Postgres limit |
+| Query embedding latency | **141 ms** | Search will be dominated by this, not the DB |
 | Biggest single source | `cassandra-metrics-prometheus.rst` → 181 chunks (6% of corpus) | A list of metric names; legit but dilutes top-k |
 
 ---
@@ -202,7 +217,7 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 
 1. ~~Project skeleton, Dockerfile, docker-compose, schema~~ ✅
 2. ~~RST/MD parser + chunker + tests~~ ✅
-3. Embedder, ingest pipeline, idempotency
+3. ~~Embedder, ingest pipeline, idempotency, background jobs~~ ✅
 4. Hybrid search + MCP tools
 5. Eval set + load benchmark
 6. README, then slide deck

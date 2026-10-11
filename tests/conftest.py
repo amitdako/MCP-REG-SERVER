@@ -45,3 +45,56 @@ def clean_db(database_url: str):
     db.ensure_schema(database_url, DIM)
     with db.connect(database_url) as conn:
         yield conn
+
+
+# ---------------------------------------------------------------- pipeline fixtures
+
+class FakeEmbedder:
+    """Deterministic vectors + call counting: lets tests assert *whether* embedding
+    happened (e.g. unchanged documents must cost zero model calls)."""
+
+    def __init__(self, counter, model_name: str = "fake-model", dim: int = DIM) -> None:
+        self.model_name = model_name
+        self.dim = dim
+        self.calls = 0
+        self.texts_embedded = 0
+        self._counter = counter
+
+    def embed_documents(self, texts):
+        import hashlib
+
+        import numpy as np
+
+        self.calls += 1
+        self.texts_embedded += len(texts)
+        out = []
+        for t in texts:
+            seed = int.from_bytes(hashlib.sha256(t.encode()).digest()[:8], "little")
+            v = np.random.default_rng(seed).normal(size=self.dim).astype(np.float32)
+            out.append(v / np.linalg.norm(v))
+        return np.stack(out)
+
+    def embed_query(self, text):
+        return self.embed_documents([text])[0]
+
+    def token_counter(self):
+        return self._counter
+
+
+@pytest.fixture(scope="session")
+def token_counter():
+    pytest.importorskip("transformers")
+    from rag_mcp.tokens import TokenCounter
+
+    return TokenCounter.from_pretrained("BAAI/bge-small-en-v1.5")
+
+
+@pytest.fixture
+def pool(clean_db, database_url):
+    with db.create_pool(database_url) as p:
+        yield p
+
+
+@pytest.fixture
+def fake_embedder(token_counter):
+    return FakeEmbedder(token_counter)

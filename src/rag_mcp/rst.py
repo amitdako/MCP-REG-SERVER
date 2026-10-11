@@ -22,6 +22,18 @@ _INCLUDE = re.compile(r"^(?P<indent>[ \t]*)\.\.[ \t]+include::[ \t]*(?P<target>\
 _MAX_INCLUDE_DEPTH = 5
 
 
+def _include_path(target: str, file_path: Path, root_dir: Path) -> Path:
+    return (root_dir / target.lstrip("/")) if target.startswith("/") else (file_path.parent / target)
+
+
+def include_targets(text: str, file_path: Path, root_dir: Path) -> list[Path]:
+    """Files this document pulls in with `.. include::` (not recursive)."""
+    return [
+        _include_path(m["target"], file_path, root_dir).resolve()
+        for m in map(_INCLUDE.match, text.splitlines()) if m
+    ]
+
+
 def resolve_includes(text: str, file_path: Path, root_dir: Path, _depth: int = 0) -> str:
     """Inline `.. include::` directives (textual inclusion, as Sphinx does).
 
@@ -35,7 +47,7 @@ def resolve_includes(text: str, file_path: Path, root_dir: Path, _depth: int = 0
             out.append(line)
             continue
         target = m["target"]
-        path = (root_dir / target.lstrip("/")) if target.startswith("/") else (file_path.parent / target)
+        path = _include_path(target, file_path, root_dir)
         if _depth >= _MAX_INCLUDE_DEPTH:
             log.warning("include depth limit reached at %s -> %s", file_path, target)
             continue

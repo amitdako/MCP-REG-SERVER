@@ -7,6 +7,7 @@ from importlib import resources
 
 import psycopg
 from pgvector.psycopg import register_vector
+from psycopg_pool import ConnectionPool
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +24,14 @@ def connect(database_url: str) -> psycopg.Connection:
     conn = psycopg.connect(database_url)
     register_vector(conn)
     return conn
+
+
+def create_pool(database_url: str, max_size: int = 4) -> ConnectionPool:
+    """Pool shared by tool calls and the background ingest worker.
+    Call ensure_schema first: register_vector needs the extension to exist."""
+    return ConnectionPool(
+        database_url, min_size=1, max_size=max_size, configure=register_vector, open=True,
+    )
 
 
 def schema_sql(embedding_dim: int) -> str:

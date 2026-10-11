@@ -5,3 +5,7 @@ sentence-transformers==6.1.0
 psycopg[binary]==3.3.6
 psycopg-pool==3.3.3
 pgvector==0.5.1
+# URL ingest: fetching, and HTML -> Markdown so headings survive for chunking.
+httpx==0.28.1
+beautifulsoup4==4.15.0
+markdownify==1.2.3
