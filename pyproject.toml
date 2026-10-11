@@ -1,0 +1,12 @@
+[project]
+name = "rag-mcp-server"
+version = "0.1.0"
+description = "MCP server for retrieval-augmented question answering over documentation (pgvector + local embeddings)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = [
+    "db: needs a running PostgreSQL with pgvector (skipped if unavailable)",
+]

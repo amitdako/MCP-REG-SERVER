@@ -1,0 +1,7 @@
+# Runtime dependencies (exact pins for reproducible builds).
+# torch is installed separately in the Dockerfile from the CPU-only index.
+mcp==2.3.0
+sentence-transformers==6.1.0
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3
+pgvector==0.5.1
