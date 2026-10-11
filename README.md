@@ -48,31 +48,51 @@ Follow progress with `docker logs -f rag-ingest` (Ctrl+C stops following, not th
 
 ### 3. Add the server to Claude
 
-Replace `/ABSOLUTE/PATH/TO/MCP-REG-SERVER` with the folder you cloned into
-(on Windows use forward slashes, e.g. `C:/Users/me/MCP-REG-SERVER`).
+Claude launches the server itself over stdio (`docker compose run --rm -T mcp-server`: a fresh
+container per session, no TTY; if the database isn't running, Compose starts it first).
+Pick **one** of these:
 
-**Claude Code:**
+**A. Claude Code, nothing to type (recommended).** The repo ships a [`.mcp.json`](.mcp.json).
+Open Claude Code **in the cloned folder** (`cd MCP-REG-SERVER` then `claude`, or open the folder
+in the Claude desktop app's Code tab or the IDE extension) and **approve the `rag-docs` server**
+when asked. No path to edit: the server is started from the project folder.
+
+**B. Claude Code, registered for use from any folder.** Run this **inside the cloned folder**;
+the full path is filled in for you:
 
 ```bash
-claude mcp add rag-docs -- docker compose -f /ABSOLUTE/PATH/TO/MCP-REG-SERVER/docker-compose.yml run --rm -T mcp-server
+# macOS / Linux
+claude mcp add rag-docs -- docker compose -f "$(pwd)/docker-compose.yml" run --rm -T mcp-server
 ```
 
-**Claude Desktop** (`claude_desktop_config.json`, then restart Claude Desktop):
+```powershell
+# Windows PowerShell
+claude mcp add rag-docs -- docker compose -f "$PWD\docker-compose.yml" run --rm -T mcp-server
+```
+
+(Git Bash on Windows: use `"$(pwd -W)/docker-compose.yml"`.) `claude: command not found` means
+the Claude Code CLI isn't installed or isn't on your PATH: install it with
+`npm install -g @anthropic-ai/claude-code`, or use option A in the desktop app.
+
+**C. Claude Desktop (chat app).** Add this to `claude_desktop_config.json`
+(Settings → Developer → Edit Config), then restart Claude Desktop. Use the **full path to the
+`docker-compose.yml` file**, with forward slashes even on Windows:
 
 ```json
 {
   "mcpServers": {
     "rag-docs": {
       "command": "docker",
-      "args": ["compose", "-f", "/ABSOLUTE/PATH/TO/MCP-REG-SERVER/docker-compose.yml",
+      "args": ["compose", "-f", "C:/Users/you/MCP-REG-SERVER/docker-compose.yml",
                "run", "--rm", "-T", "mcp-server"]
     }
   }
 }
 ```
 
-Claude launches the server itself over stdio (`run --rm -T`: a fresh container per session,
-no TTY). If the database isn't running, Compose starts it first.
+(macOS/Linux example path: `/Users/you/MCP-REG-SERVER/docker-compose.yml`.)
+
+**Check it works:** in Claude Code, `/mcp` should list `rag-docs` as connected, with 5 tools.
 
 ### 4. Ask
 
@@ -256,10 +276,18 @@ Every design decision, with why and what it gives up, is in
 
 ## Troubleshooting
 
-- **Claude shows the server as failed:** check that Docker is running and the path in the
-  config is absolute. Run the config's command yourself — it should wait silently for input
-  (Ctrl+C to stop).
+- **`claude: command not found`:** the Claude Code CLI isn't installed or on your PATH —
+  `npm install -g @anthropic-ai/claude-code`, or open the folder in the Claude desktop app's
+  Code tab (option A).
+- **`rag-docs` not listed in Claude Code:** start Claude Code inside the cloned folder (option A),
+  and approve the project server when prompted (or check `claude mcp list`).
+- **Claude shows the server as failed:** check that Docker is running; with options B/C, that the
+  path points to the `docker-compose.yml` **file** (in bash, `\` is an escape character — use
+  `/`). Run the configured command yourself — it should wait silently for input (Ctrl+C to stop).
 - **"Conflict. The container name "/rag-ingest" is already in use":** a previous ingest
   container exists — `docker rm rag-ingest`, then run step 2 again.
 - **Port 5433 already in use:** `DB_PORT=5434 docker compose up -d db`.
+- **Git Bash on Windows: `no such file or directory ... C:/Program Files/Git/data/...`:**
+  Git Bash rewrites arguments starting with `/`. Prefix the command with `MSYS_NO_PATHCONV=1`
+  (or use PowerShell). Ingesting through Claude is not affected.
 - **Start over:** `docker compose down -v` deletes all ingested data.
