@@ -6,7 +6,7 @@ import pytest
 
 from rag_mcp import loaders
 from rag_mcp.ingest import Ingestor
-from rag_mcp.search import Searcher, format_hits, keyword_terms
+from rag_mcp.search import Fusion, Searcher, format_hits, is_identifier, keyword_terms
 
 pytestmark = pytest.mark.db
 pytest.importorskip("sentence_transformers")
@@ -51,6 +51,19 @@ def test_keyword_terms_drop_stopwords_keep_identifiers():
     assert keyword_terms("What is the default tcp_keepalives_idle for Aiven?") == \
         ["default", "tcp_keepalives_idle", "aiven"]
     assert keyword_terms("How do I set kafka.consumer.timeout to 30?") == ["set", "kafka.consumer.timeout", "30"]
+
+
+def test_identifier_detection():
+    assert all(map(is_identifier, ["max_connections", "kafka.consumer.timeout", "pg16"]))
+    assert not any(map(is_identifier, ["connections", "kafka", "30"]))
+
+
+def test_single_sided_fusion_modes(corpus):
+    # Used by the eval to compare vector-only / keyword-only against hybrid.
+    vector_only = corpus.search("tcp keepalive idle", top_k=10, fusion=Fusion(keyword_weight=0))
+    keyword_only = corpus.search("tcp keepalive idle", top_k=10, fusion=Fusion(vector_weight=0))
+    assert vector_only and all(h.vector_rank for h in vector_only)
+    assert keyword_only and all(h.keyword_rank for h in keyword_only)
 
 
 QUESTION = "What is the default tcp_keepalives_idle for Aiven for PostgreSQL?"

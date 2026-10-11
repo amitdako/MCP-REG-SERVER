@@ -41,6 +41,23 @@ _TERM = re.compile(r"[A-Za-z0-9][\w.\-/]*[A-Za-z0-9]|[A-Za-z0-9]")
 
 
 @dataclass(frozen=True)
+class Fusion:
+    """How the two rankings are combined: score = sum of weight / (RRF_K + rank).
+
+    The defaults are plain RRF. The other settings exist so the eval can compare
+    vector-only (keyword_weight=0), keyword-only (vector_weight=0) and an
+    identifier boost (keyword side weighted up when the query names an identifier).
+    """
+
+    vector_weight: float = 1.0
+    keyword_weight: float = 1.0
+    identifier_boost: float = 1.0
+
+
+DEFAULT_FUSION = Fusion()
+
+
+@dataclass(frozen=True)
 class Hit:
     rank: int
     score: float
@@ -50,6 +67,11 @@ class Hit:
     title: str | None
     heading_path: list[str]
     content: str
+
+
+def is_identifier(term: str) -> bool:
+    """max_connections, kafka.consumer.timeout, pg16 - not plain words."""
+    return bool(re.search(r"[_.]", term) or (re.search(r"\d", term) and re.search(r"[a-z]", term)))
 
 
 def keyword_terms(query: str) -> list[str]:
@@ -99,13 +121,14 @@ keyword_hits AS (
 ),
 fused AS (
     SELECT id,
-           sum(1.0 / (%(rrf_k)s + rnk)) AS score,
+           sum(CASE side WHEN 'v' THEN %(wv)s ELSE %(wk)s END / (%(rrf_k)s + rnk)) AS score,
            min(rnk) FILTER (WHERE side = 'v') AS vector_rank,
            min(rnk) FILTER (WHERE side = 'k') AS keyword_rank
     FROM (SELECT id, rnk, 'v' AS side FROM vector_hits
           UNION ALL
           SELECT id, rnk, 'k' AS side FROM keyword_hits) both_sides
     GROUP BY id
+    HAVING sum(CASE side WHEN 'v' THEN %(wv)s ELSE %(wk)s END) > 0  -- drop a side weighted 0
 )
 SELECT f.score, f.vector_rank, f.keyword_rank, s.source_uri, s.title, c.heading_path, c.content
 FROM fused f
@@ -121,11 +144,22 @@ class Searcher:
         self.pool = pool
         self.embedder = embedder
 
-    def search(self, query: str, top_k: int = 5, source_filter: str | None = None) -> list[Hit]:
-        qvec = self.embedder.embed_query(query)
+    def search(self, query: str, top_k: int = 5, source_filter: str | None = None,
+               fusion: Fusion = DEFAULT_FUSION) -> list[Hit]:
+        return self.search_with_vector(self.embedder.embed_query(query), query, top_k, source_filter, fusion)
+
+    def search_with_vector(self, qvec, query: str, top_k: int = 5, source_filter: str | None = None,
+                           fusion: Fusion = DEFAULT_FUSION) -> list[Hit]:
+        """The database part of search, for an already embedded query (lets the
+        benchmark time embedding and SQL separately)."""
+        terms = keyword_terms(query)
+        keyword_weight = fusion.keyword_weight
+        if any(is_identifier(t) for t in terms):
+            keyword_weight *= fusion.identifier_boost
         params = {
-            "qvec": qvec, "terms": keyword_terms(query), "filter": source_filter or None,
+            "qvec": qvec, "terms": terms, "filter": source_filter or None,
             "n": CANDIDATES_PER_RETRIEVER, "rrf_k": RRF_K, "k": top_k,
+            "wv": fusion.vector_weight, "wk": keyword_weight,
         }
         with self.pool.connection() as conn, conn.transaction():
             if source_filter:

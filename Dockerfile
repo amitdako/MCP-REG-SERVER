@@ -32,6 +32,9 @@ ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 
 COPY src/ ./src/
+# Eval set + benchmark/eval scripts, so they run with `docker compose run` (no mounts).
+COPY scripts/ ./scripts/
+COPY eval/ ./eval/
 
 RUN useradd --create-home --uid 1000 app && chown -R app /opt/hf-cache
 USER app

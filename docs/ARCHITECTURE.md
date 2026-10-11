@@ -96,7 +96,8 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 | Model **downloaded at `docker build`** time, then `HF_HUB_OFFLINE=1`; CPU-only PyTorch wheel | No network on first run, no API key (verified: loads with `--network none`); image stays lean without CUDA | Bigger image than a no-model image; rebuild to change model |
 | Normalized embeddings + cosine distance | Standard for bge; makes scores comparable | — |
 | **Keep PyTorch for now** (chosen with Amit) instead of ONNX Runtime / int8 | No new risk mid-project; measured throughput (4.4 chunks/s) is acceptable with background jobs | ONNX int8 would likely be 2–3× faster and ~700 MB smaller — top "next level" item |
-| Model loads in a **background thread**; all model calls serialized by a lock | Handshake isn't blocked by the ~10 s import; CPU is the bottleneck, so parallel encode calls only slow each other | A search can wait behind one ingest batch |
+| Model loads in a **background thread** | Handshake isn't blocked by the ~10 s import | First search waits for the load |
+| Model calls run one at a time; **searches have priority over ingest batches** (ingest embeds batch by batch and yields to waiting searches) | Found by the load benchmark: a plain lock around the whole document made searches wait up to **62 s** during an ingest; a per-batch lock still starved them (CPython locks are unfair: p95 31 s). With priority: **max 4.4 s** (one batch). Regression test fails on the old code | A search during an ingest still waits ~3 s for the running batch (smaller batches = shorter wait, slower ingest) |
 | (Optional) hosted provider via env var — **not planned for v1** | Not required; keeps dependencies minimal | — |
 
 ### 3.5 Storage & schema
@@ -132,7 +133,7 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 | **Hybrid search: vector top-30 + keyword top-30, fused with RRF (k=60)** | Test questions target exact tokens (parameter names, limits) where vectors are fuzzy; RRF needs no score calibration | Two retrievers per query (still ~100 ms warm) |
 | Keyword query: **drop stopwords, match each term separately (OR)**; identifiers Postgres splits (`max_connections`) matched as an **exact phrase**; dotted names stay one token | Measured: `websearch_to_tsquery` ANDs every word ("how & many & can & …") → natural-language questions would almost never match | No stemming (vector side covers paraphrases) |
 | **Keyword ranking = BM25-style IDF** (chosen with Amit): score = Σ log(1 + (N − df + .5)/(df + .5)) over matched terms; df per term via the GIN index, computed per query | Found on real data: `ts_rank` has no IDF, so pages repeating "Aiven PostgreSQL" beat the one chunk with `tcp_keepalives_idle` (correct page came **5th → 1st** after the fix) | No term-frequency saturation / length normalisation (not full BM25); df counting costs O(matches) per term — a scale hotspot (precomputed term stats or a BM25 index at 100×) |
-| Plain RRF kept; **identifier boost decided by the eval in step 5** (chosen with Amit) | A synthetic test showed RRF lets "decent on both sides" beat "#1 on keyword only"; on real data the case worked. Decide with numbers, not one example | — |
+| **Plain RRF kept — decided by the eval** (rule chosen with Amit: decide with data). Identifier boost ×2 gave identical results on all 30 questions | Simpler, no measured benefit | RRF's known weakness remains: a chunk #1 on one side only can lose to chunks decent on both (eval question r06: keyword #1 → hybrid #9) |
 | Each retriever takes its top-N in a subquery, ranks outside | A window function around `ORDER BY … LIMIT` forces scoring every row and **bypasses HNSW** | — |
 | `source_filter` = case-insensitive substring of `source_uri`; with a filter, `hnsw.iterative_scan = relaxed_order` (pgvector 0.8) | Filtered HNSW scans otherwise run out of candidates before the LIMIT | — |
 | **Results as readable Markdown** (chosen with Amit): `[n] Page > Section`, `source:` URL, score line (vector #, keyword #), chunk text | LLMs read it naturally; citations obvious; the score line makes retrieval debuggable | Not machine-structured |
@@ -227,6 +228,46 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 
 ---
 
+## 6b. Step 5 results (eval + load)
+
+**Retrieval quality** — 30 questions ([eval/RESULTS.md](../eval/RESULTS.md)): 20 from randomly sampled pages, 10 targeted.
+
+| Config | hit@1 | hit@5 | MRR@10 |
+|---|---|---|---|
+| vector only | 70% | 90% | 0.79 |
+| keyword only (IDF) | 73% | 93% | 0.83 |
+| **hybrid (RRF)** | **80%** | **97%** | **0.88** |
+| hybrid + identifier boost | 80% | 97% | 0.88 |
+
+Vector and keyword fail on *different* questions; hybrid recovers most. Caveat: n=30 (1 question = 3.3%).
+
+**Load** (laptop, Docker VM 8 vCPU / 3.7 GiB, real corpus 2,907 chunks):
+
+| What | Result |
+|---|---|
+| Search latency, sequential warm | p50 **38 ms**, p95 70 ms — embedding 29 ms, SQL 11 ms |
+| Concurrency, one server process | **~14–19 req/s ceiling**; latency grows linearly: p50 51 ms (1 client) → 245 ms (4) → **1.1 s (16)** |
+| Single-document ingest (sync tool path) | ~5 chunks/s: 10 KB 1.3–2.6 s, 100 KB 14–19 s, **1 MB 132–148 s** (743 chunks) |
+| Whole repo ingest / unchanged re-ingest | 688 s / 12–13 s |
+| Search while an ingest runs | before fix: p95 37 s, max 62 s → **after: p95 4.0 s, max 4.4 s** |
+| Memory per server process (model loaded) | **375 MiB** (each Claude session spawns its own process) |
+
+**Scale** (real chunks replicated with perturbed vectors, separate DB):
+
+| Chunks | vector top-30 p50/p95 | keyword top-30 p50/p95 | full search p50/p95 | HNSW build | DB size |
+|---|---|---|---|---|---|
+| 2,907 (1×) | 0.9 / 3.0 ms | 5.8 / 10.8 ms | **8 / 13 ms** | 0.9 s | 28 MB |
+| 29,070 (10×) | 2.2 / 7.8 ms | 102 / 230 ms | **130 / 415 ms** | 9.2 s | 201 MB |
+| 145,350 (50×) | 2.1 / 6.7 ms | 512 / 830 ms | **507 / 809 ms** | 101 s | 963 MB |
+
+**What breaks first, in order:**
+1. **Embedding throughput** — CPU-bound model: ~5 chunks/s ingest, ~15 searches/s per process; latency grows linearly with concurrent clients. A 1 MB document blocks the synchronous `ingest` call for ~2.5 min (5 MB limit ≈ 12 min).
+2. **Keyword side at data growth** — IDF counts matching chunks per term on every query: grows ~linearly with corpus size (6 → 102 → 512 ms) while HNSW stays ~2 ms. Fix: precomputed term statistics updated at ingest, or a BM25 index. (Worst case: copies share vocabulary exactly.)
+3. **Memory per session** — 375 MiB per server process × concurrent Claude sessions.
+4. **HNSW build time** — 101 s at 145k chunks with default `maintenance_work_mem`; matters for full rebuilds, not incremental inserts.
+
+---
+
 ## 7. Assumptions (to copy into the README)
 
 - "Whole repo" = all `.rst` and `.md` files; `includes/` is inlined into parent pages rather than
@@ -243,5 +284,5 @@ Fusion → top-k chunks with source, heading path and docs URL → Claude answer
 2. ~~RST/MD parser + chunker + tests~~ ✅
 3. ~~Embedder, ingest pipeline, idempotency, background jobs~~ ✅
 4. ~~Hybrid search + MCP tools~~ ✅
-5. Eval set + load benchmark
+5. ~~Eval set + load benchmark~~ ✅
 6. README, then slide deck

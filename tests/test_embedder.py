@@ -44,3 +44,25 @@ def test_wrong_dimension_config_fails_clearly():
     e = SentenceTransformerEmbedder("BAAI/bge-small-en-v1.5", 768)
     with pytest.raises(RuntimeError, match="384 dims"):
         e.embed_query("x")
+
+
+def test_search_is_not_starved_by_a_running_ingest(embedder):
+    # Regression: with a plain lock, the ingest thread re-acquired it batch after batch
+    # and a search waited for the whole document (measured up to ~40 s).
+    import threading
+    import time
+
+    texts = [f"document number {i} about kafka topics and connection limits " * 8 for i in range(480)]
+    ingest = threading.Thread(target=embedder.embed_documents, args=(texts,))
+    started = time.perf_counter()
+    ingest.start()
+    time.sleep(0.5)
+    waits = []
+    while ingest.is_alive() and len(waits) < 5:
+        t = time.perf_counter()
+        embedder.embed_query("how many topics can kafka have")
+        waits.append(time.perf_counter() - t)
+    ingest.join()
+    total = time.perf_counter() - started
+    assert waits, "ingest finished too fast to measure"
+    assert max(waits) < total / 3  # a search waits for one batch, not the whole ingest

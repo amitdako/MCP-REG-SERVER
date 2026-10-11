@@ -4,9 +4,12 @@ The model loads in a background thread: importing torch + sentence-transformers
 takes ~10 s, and the MCP handshake must not wait for that. Callers that need
 the model block until it is ready.
 
-All model calls are serialized with a lock. The CPU is the bottleneck, so
-running a search and an ingest batch in parallel only slows both; with the lock
-a search waits for at most one ingest batch (see INGEST_BATCH_SIZE).
+Model calls run one at a time (the CPU is the bottleneck: parallel calls only
+slow each other), and **searches have priority** over ingest batches: an ingest
+embeds batch by batch and, before each batch, yields to any waiting search. A
+plain lock is not enough - measured: CPython's lock is unfair, so the ingest
+thread re-acquired it batch after batch and searches waited up to ~40 s.
+With priority, a search waits for at most the one batch already running.
 """
 
 from __future__ import annotations
@@ -47,7 +50,9 @@ class SentenceTransformerEmbedder:
         self._ready = threading.Event()
         self._started = False
         self._start_lock = threading.Lock()
-        self._lock = threading.Lock()
+        self._model_turn = threading.Condition()
+        self._model_busy = False
+        self._searches_waiting = 0
         self._query_prefix = BGE_QUERY_PREFIX if "bge" in model_name.lower() else ""
 
     def start_loading(self) -> None:
@@ -86,19 +91,43 @@ class SentenceTransformerEmbedder:
 
     def embed_documents(self, texts: list[str]) -> np.ndarray:
         model = self._get_model()
-        with self._lock:
-            return model.encode(
-                texts, batch_size=self.batch_size, normalize_embeddings=True,
+        # Lock per batch, not per call: a big document is hundreds of chunks (minutes),
+        # and a search must only wait for the current batch, not the whole document.
+        parts = []
+        for start in range(0, len(texts), self.batch_size):
+            batch = texts[start:start + self.batch_size]
+            parts.append(self._exclusive(lambda: model.encode(
+                batch, batch_size=self.batch_size, normalize_embeddings=True,
                 show_progress_bar=False, convert_to_numpy=True,
-            )
+            ), priority=False))
+        return np.concatenate(parts) if parts else np.empty((0, self.dim), dtype=np.float32)
 
     def embed_query(self, text: str) -> np.ndarray:
         model = self._get_model()
-        with self._lock:
-            return model.encode(
-                self._query_prefix + text, normalize_embeddings=True,
-                show_progress_bar=False, convert_to_numpy=True,
-            )
+        return self._exclusive(lambda: model.encode(
+            self._query_prefix + text, normalize_embeddings=True,
+            show_progress_bar=False, convert_to_numpy=True,
+        ), priority=True)
+
+    def _exclusive(self, work, priority: bool):
+        """Run `work` with the model to itself. Priority work (searches) goes before
+        any non-priority work (ingest batches) that is waiting."""
+        with self._model_turn:
+            if priority:
+                self._searches_waiting += 1
+            try:
+                while self._model_busy or (not priority and self._searches_waiting):
+                    self._model_turn.wait()
+            finally:
+                if priority:
+                    self._searches_waiting -= 1
+            self._model_busy = True
+        try:
+            return work()
+        finally:
+            with self._model_turn:
+                self._model_busy = False
+                self._model_turn.notify_all()
 
     def token_counter(self) -> TokenCounter:
         return TokenCounter(self._get_model().tokenizer)
