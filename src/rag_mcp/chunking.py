@@ -1,6 +1,6 @@
 """Structure-aware, token-based chunking of a section tree.
 
-Rules (see docs/ARCHITECTURE.md, 3.3):
+Rules (see docs/ARCHITECTURE.md, 2.1 step 4):
   * A section whose whole subtree fits in `target_tokens` becomes one piece.
   * Pieces that are whole subtrees of siblings (plus their parent's intro text)
     are packed together up to `target_tokens` - never across a parent boundary.

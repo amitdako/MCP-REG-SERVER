@@ -420,6 +420,18 @@ Benchmarked on a local laptop environment (**Docker VM: 8 vCPUs / 3.7 GiB RAM**)
   chunks), while vector search stays ~2 ms. The fix is precomputed term statistics or a BM25 index.
 * **Scope & media:** no re-ranking model (kept out to save CPU latency), no JavaScript execution
   on scraped web pages, and text only (images are not indexed).
+* **No PDF or Word ingest:** only Markdown, RST, plain text, web pages and GitHub files are
+  accepted; a `.pdf` or `.docx` is rejected with an error listing the supported types. Not done
+  for time. How I'd add it: one more branch in `loaders.from_file` that extracts the text
+  (`pypdf` for PDF; `python-docx` for Word, turning its heading styles into `#` headings so the
+  structure-aware chunker still gets sections). PDFs have no reliable headings, so they would be
+  chunked by paragraph and token window; scanned PDFs would also need OCR.
+* **No hosted embedding provider** (optional in the brief): not done, to keep the server
+  dependency- and key-free. How I'd add it: a second class implementing the `Embedder` protocol
+  in `embedder.py` (it already defines `embed_documents`, `embed_query` and `token_counter`),
+  chosen in `server.py` by an `EMBEDDING_PROVIDER` variable. The chunker sizes would follow that
+  model's context limit, and since its dimension differs, `EMBEDDING_DIM` must match it; the
+  startup check refuses an existing volume with the old dimension.
 
 ## Alternative setups
 
