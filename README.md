@@ -48,17 +48,29 @@ Follow progress with `docker logs -f rag-ingest` (Ctrl+C stops following, not th
 
 ### 3. Add the server to Claude
 
-Claude launches the server itself over stdio (`docker compose run --rm -T mcp-server`: a fresh
-container per session, no TTY; if the database isn't running, Compose starts it first).
-Pick **one** of these:
+Claude starts the server itself over stdio, one fresh container per session
+(`docker compose run --rm -T mcp-server`; Compose starts the database first if it isn't running).
+Choose **one** option:
 
-**A. Claude Code, nothing to type (recommended).** The repo ships a [`.mcp.json`](.mcp.json).
-Open Claude Code **in the cloned folder** (`cd MCP-REG-SERVER` then `claude`, or open the folder
-in the Claude desktop app's Code tab or the IDE extension) and **approve the `rag-docs` server**
-when asked. No path to edit: the server is started from the project folder.
+| Option | Client | Setup | Changes global config? |
+|---|---|---|---|
+| **A** (recommended) | Claude Code | Open the folder, approve once | No |
+| **B** | Claude Code | One command | Yes |
+| **C** | Claude Desktop | Edit one JSON file | Yes |
 
-**B. Claude Code, registered for use from any folder.** Run this **inside the cloned folder**;
-the full path is filled in for you:
+#### Option A: Claude Code, zero config (recommended)
+
+The repository ships a project-scoped [`.mcp.json`](.mcp.json), so there is nothing to type or edit.
+
+1. Open Claude Code **in the cloned folder**: run `claude` from inside `MCP-REG-SERVER`, or open
+   the folder in the Claude desktop app's **Code** tab or the IDE extension.
+2. Approve the **`rag-docs`** project server when prompted.
+
+The server is registered only for this folder, so your global setup stays clean.
+
+#### Option B: Claude Code, available from any folder
+
+Run **from inside the cloned folder**; the command fills in the absolute path for you.
 
 ```bash
 # macOS / Linux
@@ -70,60 +82,70 @@ claude mcp add rag-docs -- docker compose -f "$(pwd)/docker-compose.yml" run --r
 claude mcp add rag-docs -- docker compose -f "$PWD\docker-compose.yml" run --rm -T mcp-server
 ```
 
-(Git Bash on Windows: use `"$(pwd -W)/docker-compose.yml"`.) `claude: command not found` means
-the Claude Code CLI isn't installed or isn't on your PATH: install it with
-`npm install -g @anthropic-ai/claude-code`, or use option A in the desktop app.
+```bash
+# Windows Git Bash (pwd -W prints a Windows path such as C:/Users/...)
+claude mcp add rag-docs -- docker compose -f "$(pwd -W)/docker-compose.yml" run --rm -T mcp-server
+```
 
-**C. Claude Desktop (the chat app), step by step.**
+> **`claude: command not found`?** The Claude Code CLI isn't installed or isn't on your `PATH`.
+> Install it with `npm install -g @anthropic-ai/claude-code`, or use Option A in the desktop app.
 
-*Before you start:* steps 1–2 are done (repo cloned, image built; if you cloned earlier, run
-`git pull` in the folder first), Docker Desktop is running, and you know the full path of the
-cloned folder, e.g. `C:\Users\you\MCP-REG-SERVER`.
+#### Option C: Claude Desktop
 
-1. **Open the config file.** In Claude Desktop: Settings → Developer → **Edit Config**. This
-   opens the folder with `claude_desktop_config.json` — open that file in a text editor
-   (Notepad is fine). It lives at:
+**Before you start:** steps 1–2 are done, Docker Desktop is running, and you know the absolute
+path of the cloned folder (for example `C:\Users\you\MCP-REG-SERVER`).
+
+1. **Open the config file.** In Claude Desktop go to **Settings → Developer → Edit Config**, then
+   open `claude_desktop_config.json` in a text editor:
    - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-2. **Add the `rag-docs` server — without deleting what's already there.**
-   - File empty or just `{}` → replace everything with:
-     ```json
-     {
-       "mcpServers": {
-         "rag-docs": {
-           "command": "docker",
-           "args": ["compose", "-f", "C:/Users/you/MCP-REG-SERVER/docker-compose.yml",
-                    "run", "--rm", "-T", "mcp-server"]
-         }
-       }
-     }
-     ```
-   - File already has settings (for example `"preferences": {...}`) → **keep them**: put a comma
-     after the last existing entry and add the `"mcpServers"` part before the final `}`:
-     ```json
-     {
-       "preferences": { "...": "keep everything that was here" },
-       "mcpServers": {
-         "rag-docs": {
-           "command": "docker",
-           "args": ["compose", "-f", "C:/Users/you/MCP-REG-SERVER/docker-compose.yml",
-                    "run", "--rm", "-T", "mcp-server"]
-         }
-       }
-     }
-     ```
-   - File already has `"mcpServers"` → add only the `"rag-docs": { ... }` entry inside it
-     (with a comma between entries).
-3. **Put in your real path.** Replace `C:/Users/you/MCP-REG-SERVER` with your folder, using
-   **forward slashes** `/` (even on Windows) and keeping `/docker-compose.yml` at the end.
-   macOS example: `/Users/you/MCP-REG-SERVER/docker-compose.yml`.
-4. **Save, then fully restart Claude Desktop.** Closing the window is not enough: on Windows
-   right-click the Claude icon in the system tray → Quit; on macOS press Cmd+Q. Then open it again.
-5. **Check.** Settings → Developer should list `rag-docs` without an error, and a new chat
-   can use its tools. If Claude reports a config error, the JSON is invalid — usually a
-   missing or extra comma.
 
-**Check it works:** in Claude Code, `/mcp` should list `rag-docs` as connected, with 5 tools.
+2. **Add the server entry.** This is the block to add:
+
+   ```json
+   "rag-docs": {
+     "command": "docker",
+     "args": ["compose", "-f", "C:/Users/you/MCP-REG-SERVER/docker-compose.yml",
+              "run", "--rm", "-T", "mcp-server"]
+   }
+   ```
+
+   Where it goes depends on what the file already contains:
+
+   | If the file… | Do this |
+   |---|---|
+   | is empty or contains only `{}` | Replace its contents with the complete file below, without the `"preferences"` line. |
+   | has other settings but no `"mcpServers"` | Keep everything. Add a comma after the last existing entry, then add the `"mcpServers": { ... }` part before the final `}`. |
+   | already has `"mcpServers"` | Add only the `"rag-docs": { ... }` block inside it, with a comma between it and the previous server. |
+
+   A complete file, with one existing setting kept:
+
+   ```json
+   {
+     "preferences": { "...": "existing settings stay as they are" },
+     "mcpServers": {
+       "rag-docs": {
+         "command": "docker",
+         "args": ["compose", "-f", "C:/Users/you/MCP-REG-SERVER/docker-compose.yml",
+                  "run", "--rm", "-T", "mcp-server"]
+       }
+     }
+   }
+   ```
+
+3. **Set your path.** Replace `C:/Users/you/MCP-REG-SERVER` with your folder. Use **forward
+   slashes** (`/`), even on Windows, because a single backslash is invalid in JSON. Keep
+   `/docker-compose.yml` at the end. macOS example: `/Users/you/MCP-REG-SERVER/docker-compose.yml`.
+
+4. **Restart fully.** Save the file and quit Claude Desktop completely (Windows: system tray icon
+   → **Quit**; macOS: **Cmd+Q**). Closing the window is not enough. Then reopen it.
+
+#### Verify the connection
+
+- **Claude Code:** run `/mcp`. `rag-docs` should be **connected**, with 5 tools.
+- **Claude Desktop:** **Settings → Developer** lists `rag-docs` without an error, and its tools
+  appear in a new chat's tools menu. A config error usually means invalid JSON, most often a
+  missing or extra comma.
 
 ### 4. Ask
 
