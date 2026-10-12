@@ -36,6 +36,9 @@ The first build downloads CPU-only PyTorch and bakes the embedding model into th
 (measured on a fresh clone without cache: **~5.5 min**; later builds take seconds). The database schema is created automatically when the server first
 starts (see [Database schema & initialization](#database-schema--initialization)).
 
+> **Troubleshooting:** *Port 5433 already in use* means another Postgres is using that port. Start
+> the database on a different one: `DB_PORT=5434 docker compose up -d db`.
+
 ### 2. Start ingesting the Aiven docs (runs in the background)
 
 ```bash
@@ -46,6 +49,10 @@ This clones the repo and ingests all its Markdown/RST pages: 814 pages → 2,907
 **~11 minutes** on a laptop CPU (measured 10.8 min on a fresh clone; embedding runs on CPU).
 Pages become searchable one by one as they are stored, so you can continue with step 3 now.
 Follow progress with `docker logs -f rag-ingest` (Ctrl+C stops following, not the ingest).
+
+> **Troubleshooting:** *Conflict. The container name "/rag-ingest" is already in use* means a
+> previous ingest container still exists. Remove it with `docker rm rag-ingest`, then run the
+> command again.
 
 ### 3. Add the server to Claude
 
@@ -58,6 +65,13 @@ no setup.
    with 5 tools.)
 <img width="918" height="253" alt="image" src="https://github.com/user-attachments/assets/94d8bb46-faf1-4a8f-abb8-ed6549ae0c5c" />
 
+Prefer a visual desktop app over the terminal? Use the [Claude Desktop App](#claude-desktop-app) setup instead.
+
+> **Troubleshooting:** *`claude: command not found`* means the Claude Code CLI isn't installed or
+> isn't on your `PATH`: `npm install -g @anthropic-ai/claude-code`. If **`rag-docs` isn't listed**,
+> make sure Claude Code was started inside the cloned folder and that you approved the project
+> server; `claude mcp list` shows its status.
+
 ### 4. Query the server (test)
 
 Once the ingest from step 2 has finished (`docker logs rag-ingest` ends with a summary showing
@@ -69,6 +83,10 @@ Claude calls the server's `search` tool over stdio, gets the matching chunk from
 `idle-connections.rst`, and answers **180 seconds**, citing the page's GitHub URL. The first search
 of a session takes about 15 s while the embedding model loads; after that, searches take ~0.1 s.
 More questions and real tool output: [Search](#search).
+
+> **Troubleshooting:** if the answer doesn't cite the expected page, the ingest from step 2 is
+> probably still running: pages become searchable as they are stored. Watch live progress with
+> `docker logs -f rag-ingest`.
 
 ---
 
@@ -325,16 +343,31 @@ Claude ──stdio──► mcp-server (one Python process per Claude session)
 Every design decision, with why and what it gives up, is in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Measured performance (laptop, Docker VM 8 vCPU / 3.7 GiB)
+## Measured performance & benchmarks
 
-| | |
-|---|---|
-| Full devportal ingest | 814 pages → 2,907 chunks in ~11.5 min (~5 chunks/s, CPU embedding) |
-| Re-ingest, nothing changed | 12 s |
-| Search latency | p50 38 ms, p95 70 ms (embedding 29 ms, SQL 11 ms) |
-| Throughput, one server process | ~15 searches/s |
-| Memory per server process | 375 MiB |
-| 50× corpus (145k chunks) | search p50 507 ms — the keyword side is the first to slow down |
+Benchmarked on a local laptop environment (**Docker VM: 8 vCPUs / 3.7 GiB RAM**). Reproduce with
+`scripts/benchmark.py`; all numbers are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#6b-step-5-results-eval--load).
+
+### Ingestion metrics
+
+| Scenario | Scale | Time / throughput | Key takeaway |
+| :--- | :--- | :--- | :--- |
+| **Initial ingest** | 814 pages (2,907 chunks) | ~11.5 min (~5 chunks/s) | CPU-bound embedding generation. |
+| **Re-ingest (unchanged)** | 814 pages | **12 seconds** | Fast hash-based idempotency skip. |
+
+### Search performance (standard corpus)
+
+* **Search latency (p50):** `38 ms` *(median of each part: embedding 29 ms, SQL hybrid query 11 ms)*
+* **Search latency (p95):** `70 ms`
+* **Throughput:** `~15 searches/sec` (single server process)
+* **Memory overhead:** `~375 MiB` per process
+
+### Scaling benchmark (50× corpus, 145,000 chunks)
+
+* **Search latency (p50):** `507 ms`
+* **Bottleneck analysis:** vector retrieval (HNSW) stays fast at scale (`2.1 ms` p50); keyword
+  ranking is the primary latency factor (`512 ms` p50), because its IDF weights are computed per
+  query by counting the matching chunks for every term, which grows with the corpus.
 
 ## Assumptions
 
@@ -345,71 +378,40 @@ Every design decision, with why and what it gives up, is in
 - English content; one user; no authentication (local stdio server).
 - A single Postgres container and one server process per Claude session (as the task allows).
 
-## Known limitations
+## Known limitations & trade-offs
 
-- **Embedding on CPU is the bottleneck**: ~5 chunks/s to ingest; a single document ingested
-  synchronously blocks the tool call (1 MB ≈ 2.5 min). Directories/repos run as background jobs.
-- **Ingest jobs live in memory**: if the Claude session ends, the job stops; re-run the same
-  ingest and it resumes (unchanged pages are skipped).
-- The first search of a session waits for the model to load (~10–15 s).
-- Keyword scoring counts matching chunks per query; it slows down roughly linearly with corpus
-  size (fine here, ~0.5 s at 50×).
-- No reranker; JavaScript-rendered web pages are not executed; images are not indexed.
+* **CPU embedding overhead:** ingestion runs on the CPU at ~5 chunks/sec. A single large document
+  is processed synchronously and blocks the tool call (a 1 MB document takes ~2.5 min), whereas
+  directories and repositories are handled as asynchronous background jobs.
+* **In-memory job state:** background ingest jobs are bound to the active session's server process.
+  If the session ends mid-job, re-running the same ingest resumes the work, skipping files that
+  are already stored via hash comparison.
+* **Cold start latency:** the first query of a new session waits ~10–15 s while the embedding
+  model loads into memory. Later queries take ~40 ms median (p95 70 ms).
+* **Keyword search scaling:** keyword scoring computes its IDF weights per query, so its cost grows
+  roughly linearly with corpus size: 6 ms → 102 ms → 512 ms p50 at 1× / 10× / 50× (145,000
+  chunks), while vector search stays ~2 ms. The fix is precomputed term statistics or a BM25 index.
+* **Scope & media:** no re-ranking model (kept out to save CPU latency), no JavaScript execution
+  on scraped web pages, and text only (images are not indexed).
 
-## Troubleshooting
+## Alternative setups
 
-- **`claude: command not found`:** the Claude Code CLI isn't installed or on your PATH —
-  `npm install -g @anthropic-ai/claude-code`, or open the cloned folder in the Claude desktop
-  app's **Code** tab.
-- **`rag-docs` not listed in Claude Code:** start Claude Code inside the cloned folder (step 3),
-  and approve the project server when prompted (or check `claude mcp list`).
-- **Claude shows the server as failed:** check that Docker is running. With one of the
-  alternative setups below, also check that the path points to the `docker-compose.yml`
-  **file** (in bash, `\` is an escape character — use `/`). Run the configured command yourself:
-  it should wait silently for input (Ctrl+C to stop).
-- **Claude answers without the right page:** the ingest from step 2 may still be running —
-  `docker logs rag-ingest` shows its progress; pages become searchable as they are stored.
-- **"Conflict. The container name "/rag-ingest" is already in use":** a previous ingest
-  container exists — `docker rm rag-ingest`, then run step 2 again.
-- **Port 5433 already in use:** `DB_PORT=5434 docker compose up -d db`.
-- **Git Bash on Windows: `no such file or directory ... C:/Program Files/Git/data/...`:**
-  Git Bash rewrites arguments starting with `/`. Prefix the command with `MSYS_NO_PATHCONV=1`
-  (or use PowerShell). Ingesting through Claude is not affected.
-- **Start over:** `docker compose down -v` deletes all ingested data.
+The quickstart uses Claude Code in the terminal with the repo's `.mcp.json`. Choose one of these
+instead if you prefer the visual desktop app, or want the server available in every Claude Code
+session.
 
----
+### Claude Desktop App
 
-## Alternative: Claude Desktop App
-
-Use this instead of steps 3–4 to connect the **Claude Desktop chat app**.
-
-**Before you start:** steps 1–2 are done, Docker Desktop is running, and you know the absolute
-path of the cloned folder (for example `C:\Users\you\MCP-REG-SERVER`).
+**Before you start:** steps 1–2 of the quickstart are done, Docker Desktop is running, and you know
+the absolute path of the cloned folder (for example `C:\Users\you\MCP-REG-SERVER`).
 
 1. **Open the config file.** In Claude Desktop go to **Settings → Developer → Edit Config**, then
    open `claude_desktop_config.json` in a text editor:
    - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
    - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 
-2. **Add the server entry.** This is the block to add:
-
-   ```json
-   "rag-docs": {
-     "command": "docker",
-     "args": ["compose", "-f", "C:/Users/you/MCP-REG-SERVER/docker-compose.yml",
-              "run", "--rm", "-T", "mcp-server"]
-   }
-   ```
-
-   Where it goes depends on what the file already contains:
-
-   | If the file… | Do this |
-   |---|---|
-   | is empty or contains only `{}` | Replace its contents with the complete file below, without the `"preferences"` line. |
-   | has other settings but no `"mcpServers"` | Keep everything. Add a comma after the last existing entry, then add the `"mcpServers": { ... }` part before the final `}`. |
-   | already has `"mcpServers"` | Add only the `"rag-docs": { ... }` block inside it, with a comma between it and the previous server. |
-
-   A complete file, with one existing setting kept:
+2. **Add the `rag-docs` server.** The file usually already contains other settings; keep them and
+   add the `"mcpServers"` block after them, separated by a comma:
 
    ```json
    {
@@ -424,22 +426,37 @@ path of the cloned folder (for example `C:\Users\you\MCP-REG-SERVER`).
    }
    ```
 
-3. **Set your path.** Replace `C:/Users/you/MCP-REG-SERVER` with your folder. Use **forward
-   slashes** (`/`), even on Windows, because a single backslash is invalid in JSON. Keep
-   `/docker-compose.yml` at the end. macOS example: `/Users/you/MCP-REG-SERVER/docker-compose.yml`.
+   - **Empty file or `{}`:** use the block above without the `"preferences"` line.
+   - **`"mcpServers"` already exists:** add only the `"rag-docs": { ... }` entry inside it, with a
+     comma between it and the previous server.
+
+3. **Set your path.** Replace `C:/Users/you/MCP-REG-SERVER` with the absolute path of your folder,
+   keeping `/docker-compose.yml` at the end. Use **forward slashes** (`/`) on both Windows and
+   macOS: a single backslash is invalid in JSON. macOS example:
+   `/Users/you/MCP-REG-SERVER/docker-compose.yml`.
 
 4. **Restart fully.** Save the file and quit Claude Desktop completely (Windows: system tray icon
-   → **Quit**; macOS: **Cmd+Q**). Closing the window is not enough. Then reopen it.
+   → **Quit**; macOS: **Cmd+Q**); closing the window is not enough. Then reopen it.
 
-5. **Check.** **Settings → Developer** lists `rag-docs` without an error, and its tools appear in a
-   new chat's tools menu. A config error usually means invalid JSON, most often a missing or
-   extra comma.
+5. **Check.** **Settings → Developer** lists `rag-docs` without an error. A config error usually
+   means invalid JSON, most often a missing or extra comma.
 
-## Alternative: Claude Code from any folder
+> **Troubleshooting:** if `rag-docs` shows as **failed**, check that Docker Desktop is running and
+> that the path points to the `docker-compose.yml` **file**, written with forward slashes (`/`).
+> To test it outside Claude, run the configured command in a terminal: it should wait silently for
+> input (Ctrl+C to stop).
 
-The `.mcp.json` registers the server only inside the cloned folder. To make it available in every
-Claude Code session, register it once **from inside the cloned folder** (the command fills in the
-absolute path):
+**How to use:** open a new chat and ask in plain language; there are no function calls or flags
+to type. For example *"How often does ClickHouse take backups?"*, *"Ingest /data/notes.md"* or
+*"Show me all ingested sources"*. Claude calls the right `rag-docs` tool in the background and
+answers with the source cited. Files you want to ingest go in the repo's `./data` folder, which
+the server sees as `/data/...`.
+
+### Claude Code (Global Access)
+
+The repo's `.mcp.json` makes the server available only when Claude Code runs inside the cloned
+folder. To use it from any folder, register it once. Run the command for your shell **from inside
+the cloned folder**; it fills in the absolute path for you:
 
 ```bash
 # macOS / Linux
@@ -456,5 +473,33 @@ claude mcp add rag-docs -- docker compose -f "$PWD\docker-compose.yml" run --rm 
 claude mcp add rag-docs -- docker compose -f "$(pwd -W)/docker-compose.yml" run --rm -T mcp-server
 ```
 
+Then start `claude` in any folder; `/mcp` lists `rag-docs` as connected, with 5 tools.
+
 > **`claude: command not found`?** The Claude Code CLI isn't installed or isn't on your `PATH`.
-> Install it with `npm install -g @anthropic-ai/claude-code`, or open the cloned folder in the Claude desktop app's **Code** tab.
+> Install it with `npm install -g @anthropic-ai/claude-code`, or use the
+> [Claude Desktop App](#claude-desktop-app) setup above if you prefer a visual app.
+
+> **Troubleshooting (Windows):** Git Bash rewrites arguments that start with `/`, so a command like
+> `docker compose run --rm mcp-server ingest /data/notes.md` fails with *no such file or directory
+> ... C:/Program Files/Git/data/...*. Prefix such commands with `MSYS_NO_PATHCONV=1`, or run them in
+> PowerShell. The registration commands above and ingesting through Claude are not affected.
+
+**How to use:** ask in plain language, exactly as in the desktop app: *"Ingest /data/notes.md"*,
+*"How often does ClickHouse take backups?"*, *"Show me all ingested sources"*. Claude Code picks
+and calls the `rag-docs` tools itself.
+
+---
+
+## Quick troubleshooting index
+
+| Error or symptom | Where it's explained |
+|---|---|
+| `Port 5433 already in use` | [Quickstart step 1](#1-clone-build-start-the-database) |
+| `Conflict. The container name "/rag-ingest" is already in use` | [Quickstart step 2](#2-start-ingesting-the-aiven-docs-runs-in-the-background) |
+| `claude: command not found` | [Quickstart step 3](#3-add-the-server-to-claude) |
+| `rag-docs` not listed in Claude Code | [Quickstart step 3](#3-add-the-server-to-claude) |
+| Answer doesn't cite the expected page | [Quickstart step 4](#4-query-the-server-test) |
+| `rag-docs` shows as failed (Docker, path) | [Claude Desktop App](#claude-desktop-app) |
+| `no such file or directory ... C:/Program Files/Git/...` | [Claude Code (Global Access)](#claude-code-global-access) |
+
+To wipe all data and start completely fresh: `docker compose down -v`.
