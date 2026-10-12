@@ -13,7 +13,7 @@ GitHub repo.
   `.. include::` files are inlined into the pages that use them.
 - **PostgreSQL + pgvector** in Docker Compose, data persisted in a volume.
 - Measured: **97% of eval questions find the right page in the top 5**, search p50 **38 ms**
-  ([results](eval/RESULTS.md), [all measurements](docs/ARCHITECTURE.md#4-benchmark--evaluation-results)).
+  ([eval results](eval/RESULTS.md), [measurements](#measured-performance--benchmarks)).
 
 ---
 
@@ -318,7 +318,7 @@ docker compose run --rm --entrypoint python mcp-server scripts/eval_retrieval.py
 docker compose run --rm --entrypoint python mcp-server scripts/benchmark.py latency  # or: concurrency | ingest | scale
 ```
 
-What the tests cover, and why ([details](docs/ARCHITECTURE.md#46-verification)):
+What the tests cover, and why:
 - **Chunking** with the real tokenizer — no chunk ever exceeds the model's 512-token limit
   (anything beyond would silently not be embedded), no text is lost, RST edge cases.
 - **Ingest** — unchanged documents cost zero embedding calls, a failed write keeps the old
@@ -340,13 +340,13 @@ Claude ──stdio──► mcp-server (one Python process per Claude session)
                                           └─► keyword top-30 (IDF) ┴─► RRF ─► top 5 with sources
 ```
 
-Every design decision, with why and what it gives up, is in
+Components, both pipelines and the storage layout are described in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Measured performance & benchmarks
 
 Benchmarked on a local laptop environment (**Docker VM: 8 vCPUs / 3.7 GiB RAM**). Reproduce with
-`scripts/benchmark.py`; all numbers are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#4-benchmark--evaluation-results).
+`scripts/benchmark.py`; retrieval quality is in [eval/RESULTS.md](eval/RESULTS.md).
 
 ### Ingestion metrics
 
