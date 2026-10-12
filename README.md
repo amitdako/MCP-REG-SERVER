@@ -57,7 +57,20 @@ Follow progress with `docker logs -f rag-ingest` (Ctrl+C stops following, not th
 ### 3. Add the server to Claude
 
 The repo ships a pre-configured [`.mcp.json`](.mcp.json), so Claude Code finds the server with
-no setup.
+no setup. This is the whole config, in case you want to paste it into another project's
+`.mcp.json` (there, use `"-f", "/absolute/path/to/MCP-REG-SERVER/docker-compose.yml"` before
+`"run"`, as in the [global setup](#claude-code-global-access)):
+
+```json
+{
+  "mcpServers": {
+    "rag-docs": {
+      "command": "docker",
+      "args": ["compose", "run", "--rm", "-T", "mcp-server"]
+    }
+  }
+}
+```
 
 1. Go to the cloned folder: `cd MCP-REG-SERVER`
 2. Start Claude Code: `claude`
@@ -377,6 +390,12 @@ Benchmarked on a local laptop environment (**Docker VM: 8 vCPUs / 3.7 GiB RAM**)
 - The repo is archived (last commit Jan 2024); sources are cited by their GitHub URL.
 - English content; one user; no authentication (local stdio server).
 - A single Postgres container and one server process per Claude session (as the task allows).
+- "One command brings up both the database and the server": with stdio, Claude starts the
+  server itself, so it can't be a long-running `docker compose up` service (it sits under a
+  compose profile, and `docker compose up` alone starts only Postgres). The one command is the
+  MCP config's `docker compose run --rm -T mcp-server`: through `depends_on` it also creates the
+  volume, starts Postgres, waits for its healthcheck, and the server creates the schema. Step 1's
+  `docker compose up -d db` only starts the database early so the ingest can run first.
 
 ## Known limitations & trade-offs
 
