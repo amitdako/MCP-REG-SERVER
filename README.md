@@ -89,19 +89,70 @@ merges the two rankings with Reciprocal Rank Fusion.
 | `top_k` | no | `5` | How many chunks to return (1–20). |
 | `source_filter` | no | none | Only search sources whose URI contains this text, e.g. `"products/kafka"` or `"/data"`. |
 
-### Example 1: a technical parameter
+**Naming the product helps.** Both sides of the hybrid search see each chunk's breadcrumb
+(*Page > Section*), so a product named in the question pulls up the section about that product,
+even when that section sits on a cross-product page (see Example 5); `source_filter` restricts the
+search to that product's own pages.
+
+### Examples
+
+Every example below was run against the ingested devportal corpus; the retrieved source is the
+actual first result.
+
+#### Example 1: a configuration parameter
 
 - **Question:** *"What is the default tcp_keepalives_idle for Aiven for PostgreSQL?"*
-- **Retrieved context:** [`idle-connections.rst`](https://github.com/aiven/devportal/blob/main/docs/products/postgresql/reference/idle-connections.rst),
-  section *Keep-alive server side parameters* (vector rank #1, keyword rank #1)
-- **Answer:** `180` seconds.
+- **Retrieved source:** [`products/postgresql/reference/idle-connections.rst`](https://github.com/aiven/devportal/blob/main/docs/products/postgresql/reference/idle-connections.rst)
+  (vector #1, keyword #1)
+- **Expected answer:** `180` seconds.
 
-### Example 2: a calculation from a rule
+#### Example 2: a calculation from a rule
 
 - **Question:** *"How many static IP addresses do I need for a 9 node plan?"*
-- **Retrieved context:** [`static-ip-addresses.rst`](https://github.com/aiven/devportal/blob/main/docs/platform/howto/static-ip-addresses.rst),
-  section *Calculate the number of IP addresses needed* (vector rank #1, keyword rank #1)
-- **Answer:** `15` static IPs (9 nodes + 6, the rule for plans above 6 nodes).
+- **Retrieved source:** [`platform/howto/static-ip-addresses.rst`](https://github.com/aiven/devportal/blob/main/docs/platform/howto/static-ip-addresses.rst)
+  (vector #1, keyword #1)
+- **Expected answer:** `15` static IPs: plans with more than 6 nodes need the number of nodes + 6.
+
+#### Example 3: a how-to
+
+- **Question:** *"How do I enable automatic topic creation in Kafka?"*
+- **Retrieved source:** [`products/kafka/howto/create-topics-automatically.rst`](https://github.com/aiven/devportal/blob/main/docs/products/kafka/howto/create-topics-automatically.rst)
+- **Expected answer:** It is disabled by default. Enable it in the Aiven Console
+  (**Service settings → Advanced configuration**, set `auto_create_topics_enable` to `true`) or
+  with the Aiven CLI.
+
+#### Example 4: what a parameter does
+
+- **Question:** *"What does auto_create_topics_enable do?"*
+- **Retrieved source:** [`products/kafka/howto/create-topics-automatically.rst`](https://github.com/aiven/devportal/blob/main/docs/products/kafka/howto/create-topics-automatically.rst),
+  section *Enable automatic topic creation using Aiven Console*
+- **Expected answer:** Set to `true`, Kafka creates a topic automatically when a message is
+  produced to a topic that doesn't exist yet.
+
+#### Example 5: a product named in a general topic
+
+- **Question:** *"How often does Aiven for ClickHouse take backups?"*
+- **Retrieved source:** [`platform/concepts/service_backups.rst`](https://github.com/aiven/devportal/blob/main/docs/platform/concepts/service_backups.rst),
+  section *Backup profile per service > Aiven for ClickHouse®*
+- **Expected answer:** Daily, automatically: backups are incremental, encrypted and stored in
+  object storage in the same region.
+- With `source_filter="products/clickhouse"`, the first result is
+  [`products/clickhouse/concepts/disaster-recovery.rst`](https://github.com/aiven/devportal/blob/main/docs/products/clickhouse/concepts/disaster-recovery.rst)
+  (*Backup and restore*), which gives the same answer.
+
+#### Example 6: a limit that depends on the plan
+
+- **Question:** *"How many connections per GiB of RAM does Aiven for MySQL allow?"*
+- **Retrieved source:** [`products/mysql/concepts/max-number-of-connections.rst`](https://github.com/aiven/devportal/blob/main/docs/products/mysql/concepts/max-number-of-connections.rst)
+- **Expected answer:** 75 per GiB on plans under 4 GiB of RAM, 100 per GiB from 4 GiB, plus 1
+  extra connection for the system process.
+
+#### Example 7: an eligibility requirement
+
+- **Question:** *"What minimum monthly spend is required for Bring Your Own Cloud?"*
+- **Retrieved source:** [`platform/concepts/byoc.rst`](https://github.com/aiven/devportal/blob/main/docs/platform/concepts/byoc.rst),
+  section *Who is eligible for BYOC* (vector #1, keyword #1)
+- **Expected answer:** At least $5,000 per month, for at least 12 months.
 
 <details>
 <summary>What the <code>search</code> tool actually returns to Claude (Example 1, trimmed)</summary>
@@ -122,110 +173,83 @@ Each result has a breadcrumb (`Page > Section`), the source URL to cite, the chu
 each side of the hybrid search, and the chunk text.
 </details>
 
-### Questions to try
-
-Each of these was checked against the ingested corpus; the first result comes from the page listed:
-
-| Question | Expected source |
-|---|---|
-| How do I enable automatic topic creation in Kafka? | `create-topics-automatically.rst` |
-| What does auto_create_topics_enable do? | `create-topics-automatically.rst` (the parameter is also in `kafka/reference/advanced-params.rst`) |
-| How often does Aiven for ClickHouse take backups? | `platform/concepts/service_backups.rst` (daily, retention by plan) |
-| How many connections per GiB of RAM does Aiven for MySQL allow? | `mysql/concepts/max-number-of-connections.rst` |
-| What minimum monthly spend is required for Bring Your Own Cloud? | `platform/concepts/byoc.rst` |
-
 ## Ingesting content
 
-`ingest(text | path | url, name?)` stores content for search. Pass exactly one of `text`, `path`
-or `url`.
+**Inside Claude, just ask.** For example *"Ingest /data/notes.md"* or
+*"Ingest https://github.com/aiven/devportal"*: Claude invokes the `ingest` tool for you. The
+terminal command `docker compose run --rm mcp-server ingest <path or URL>` is an optional
+standalone path, with no Claude session needed (step 2 of the quickstart uses it).
 
-| Input | Example | Details |
+### Inputs
+
+`ingest(text | path | url, name?)` takes exactly one input:
+
+| Input | What it accepts | Example request to Claude |
 |---|---|---|
-| `text` | `ingest(text="# Team notes ...", name="team-notes")` | Raw text or Markdown. `name` gives it a stable URI (`text:team-notes`), so ingesting again under the same name replaces it. |
-| `path` | `ingest(path="/data/notes.md")`, `ingest(path="/data")` | A file or folder inside the container. The host's `./data` folder is mounted read-only at `/data`. Files: `.md` `.markdown` `.mdx` `.rst` `.txt`; folders: Markdown and RST only. Max 5 MB per document. |
-| `url` | `ingest(url="https://github.com/aiven/devportal")` | A web page (converted to Markdown), a raw `.md`/`.rst`/`.txt` URL, a GitHub file (`/blob/...`), or a GitHub repo or folder (`/tree/main/docs/...`). |
+| `text` | Raw text or Markdown. An optional `name` gives it a stable ID (`text:<name>`), so ingesting again under the same name replaces it. | *"Ingest this as 'team-notes': ..."* |
+| `path` | A file or folder on your machine, placed in the repo's **`./data`** folder, which the container sees as **`/data/...`** (read-only). Files: `.md` `.markdown` `.mdx` `.rst` `.txt`; folders: Markdown and RST files. | *"Ingest /data/notes.md"*, *"Ingest /data"* |
+| `url` | A web page (converted to Markdown), a raw `.md`/`.rst`/`.txt` file, a GitHub file, or a GitHub repo or folder. | *"Ingest https://github.com/aiven/devportal"* |
 
-A single document is ingested within the call:
+Each document can be up to 5 MB.
 
-```
-created: text:team-notes (1 chunks, 15 tokens)
-```
+### How it runs
 
-A folder or GitHub repo runs as a **background job**, and the call returns immediately:
+- **Single documents and text** are ingested synchronously: the call returns the result
+  (`created`, `updated` or `unchanged`, with the chunk count) as soon as the document is stored.
+- **Folders and GitHub repos** run asynchronously as a background job: the call returns a job ID
+  immediately, documents become searchable one by one, and `ingest_status(job_id)` reports
+  progress, ETA and any errors. Jobs live in the server process; if the Claude session ends,
+  run the same ingest again and finished documents are skipped.
 
-```
-Started background ingest job f15dffba for directory /data/demo. Documents become searchable as they are processed. Check progress with ingest_status(job_id="f15dffba").
-```
+### Idempotency
 
-`ingest_status(job_id?)` reports a job's progress (omit `job_id` to list all jobs of the session):
+Every document is hashed on **content + chunker version + embedding model**, so ingesting the same
+input again is safe and cheap:
 
-```json
-{
-  "job_id": "f15dffba",
-  "input": "directory /data/demo",
-  "state": "done",
-  "files_total": 1,
-  "files_processed": 1,
-  "created": 1,
-  "updated": 0,
-  "unchanged": 0,
-  "failed": 0,
-  "deleted_missing": 0,
-  "chunks_written": 1,
-  "elapsed_s": 0
-}
-```
+- **Unchanged files** are skipped instantly, with zero embedding cost (all of devportal
+  re-ingests in 12 s).
+- **Changed files** are replaced atomically: old chunks are removed and new ones written in a
+  single database transaction, so searches never see a half-updated document.
+- **Deleted files** are cleaned up automatically when a repo or folder is re-ingested in full
+  (only after a run with no failures, so a file that merely failed to load is never deleted).
 
-While a job runs it also reports `eta_s`; failures are listed in `errors` (first 20). Jobs live in
-the server process: if the Claude session ends mid-job, run the same ingest again and the finished
-documents are skipped.
-
-**Re-ingesting is safe and cheap.** Every document is hashed (content + chunker version +
-embedding model):
-
-- **Unchanged** documents (same hash) are skipped without re-embedding:
-  `unchanged: text:team-notes (1 chunks, 15 tokens)`. Re-ingesting all of devportal takes 12 s.
-- **Changed** documents are replaced atomically (old chunks out, new chunks in, one transaction),
-  and re-ingesting a folder or repo deletes sources whose files were removed upstream (only after
-  a run with no failures).
-
-Without Claude, `docker compose run --rm mcp-server ingest /data/notes.md` (or a URL) runs the same
-pipeline in the terminal.
+Because the chunker version and model are part of the hash, upgrading either one re-embeds
+everything on the next ingest.
 
 ## Managing sources
 
-`list_sources(filter?, limit=50, offset=0)` shows what is ingested. Every response starts with the
-global totals (sources, chunks, tokens, count per source type) and any running ingest jobs, then
-one page of sources, newest first:
+### Inspect what's ingested: `list_sources`
 
-```
-Total: 816 sources, 2909 chunks, 761,942 tokens (815 file, 1 text).
+Ask Claude in plain language, for example *"Show me all ingested sources"* or *"Which Kafka pages
+are ingested?"*, or call `list_sources(filter?, limit=50, offset=0)` directly.
 
-Showing 2 of 2 sources matching 'notes' (offset 0):
-- Release notes | /data/demo/release-notes.md | 1 chunks | updated 2026-10-12 09:26
-- Team notes | text:team-notes | 1 chunks | updated 2026-10-12 09:26
-```
+Every response starts with **global stats** (total sources, chunks and tokens, the count per source
+type, and any running ingest jobs), followed by **one page of sources**, newest first, each with its
+title, URI, chunk count and last update.
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `filter` | none | Keep only sources whose URI or title contains this text (case-insensitive). |
-| `limit` | `50` | Rows per page (max 200). Pagination keeps responses small: the full devportal corpus is 814 sources. |
-| `offset` | `0` | Rows to skip. When more rows exist, the response ends with `... use offset=N for more.` |
+| `filter` | none | Only sources whose URI or title contains this text (case-insensitive), e.g. `"kafka"`. |
+| `limit` | `50` | Sources per page (max 200). Paging keeps responses short enough for Claude's context: the full devportal corpus is 814 sources. |
+| `offset` | `0` | Sources to skip. When more exist, the response says which `offset` to use next. |
 
-`delete_source(source_uri)` removes one source immediately: its row and, through `ON DELETE
-CASCADE`, all of its chunks. Each chunk row holds both the embedding and the keyword index entry,
-so the source disappears from both sides of search at once. The URI must match exactly as shown by
-`list_sources` or in search results; there are no wildcards, so nothing is deleted by accident.
+### Delete a source: `delete_source`
 
-```
-> delete_source("text:team-notes")
-deleted text:team-notes (1 chunks)
+Ask Claude to delete a source by its **exact URI**, as shown by `list_sources` or in search results,
+for example *"Delete the source text:team-notes"*. This calls `delete_source(source_uri)`.
 
-> delete_source("text:does-not-exist")
-Error executing tool delete_source: no source 'text:does-not-exist'; use list_sources(filter=...) to find the exact URI
-```
+- **One step, both indexes.** The delete removes the source row, and `ON DELETE CASCADE` removes all
+  of its chunks in the same statement. Each chunk row holds both the vector embedding and the
+  keyword index entry, so the source disappears from both sides of search at once.
+- **Exact match only.** There are no wildcards or prefixes, so one call can never remove more than
+  the one source you named. An unknown URI returns an error pointing back to `list_sources`.
+- A file deleted from an ingested repo or folder comes back the next time that repo or folder is
+  re-ingested, because it still exists upstream.
 
-To remove everything at once, `docker compose down -v` deletes the database volume.
+### Reset everything (terminal)
+
+To wipe the whole database at once, run `docker compose down -v` in the repo folder: it deletes the
+data volume, and the next server start recreates an empty schema.
 
 ---
 
