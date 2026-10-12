@@ -146,6 +146,8 @@ def test_body_keeps_facts_and_drops_noise():
 
           * - Plan
             - Max connections
+          * - Startup-4
+            - 100
         """)
     out = rst.clean_body(body, {})
     for noise in ("some-label", "diagram", "page-one", "comment", ":header-rows:", ":widths:"):
@@ -153,7 +155,66 @@ def test_body_keeps_facts_and_drops_noise():
     assert "Note:\nThe limit is **100** topics." in out
     assert "```bash\navn service create --plan startup-4\n```" in out
     assert 'Run this:\n```\npsql "$SERVICE_URI"\n```' in out
-    assert "Plans" in out and "- Max connections" in out
+    assert "Plans\n- Plan: Startup-4 · Max connections: 100" in out
+
+
+def test_list_table_rows_become_self_contained_lines():
+    body = dedent("""
+        .. list-table::
+          :header-rows: 1
+
+          * - Parameter
+            - Value Type
+            - Description
+          * - ``admin_username``
+            - string
+            - Custom username for admin user.
+
+              The default value is: ``avnadmin``
+          * - ``--remove-option migration``
+            -
+            - Removes the migration option.
+              Nested list:
+
+              - first
+              - second
+        """)
+    assert rst.clean_body(body, {}).splitlines() == [
+        "- Parameter: `admin_username` · Value Type: string · Description: Custom username "
+        "for admin user. The default value is: `avnadmin`",
+        # empty cell skipped; a deeper "- " is part of the cell, not a new column
+        "- Parameter: `--remove-option migration` · Description: Removes the migration option. "
+        "Nested list: - first - second",
+    ]
+
+
+def test_list_table_without_header_rows_keeps_plain_cells():
+    body = ".. list-table::\n\n  * - a\n    - b\n  * - c\n    - d\n"
+    assert rst.clean_body(body, {}).splitlines() == ["- a · b", "- c · d"]
+
+
+def test_half_literal_typo_is_repaired_but_links_are_not_paired_with_literals():
+    assert rst.clean_inline("The default value is: `top``", {}) == "The default value is: `top`"
+    # The `_ closing a link must not pair with the next real ``literal`` on the line.
+    line = "For `Coralogix <https://coralogix.com/>`_ integration use a custom ``logline`` format"
+    assert rst.clean_inline(line, {}) == "For Coralogix integration use a custom `logline` format"
+
+
+def test_links_and_roles_wrapped_across_lines_are_cleaned():
+    body = dedent("""
+        Another option is to use the `Aiven
+        Client <https://github.com/aiven/aiven-client>`__ . Consider :doc:`granting
+        </docs/products/clickhouse/howto/manage-users-roles>` only what is needed.
+
+        .. code-block:: rst
+
+            keep `this
+            <https://example.com>`_ verbatim
+        """)
+    out = rst.clean_body(body, {})
+    assert "use the Aiven Client . Consider granting only what is needed." in out.replace("\n", " ")
+    assert "github.com" not in out and "manage-users-roles" not in out
+    assert "keep `this\n<https://example.com>`_ verbatim" in out
 
 
 def test_code_is_kept_verbatim():

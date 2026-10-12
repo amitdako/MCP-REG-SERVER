@@ -45,7 +45,7 @@ starts (see [Database schema & initialization](#database-schema--initialization)
 docker compose run -d --name rag-ingest mcp-server ingest https://github.com/aiven/devportal
 ```
 
-This clones the repo and ingests all its Markdown/RST pages: 814 pages → 2,907 chunks in
+This clones the repo and ingests all its Markdown/RST pages: 814 pages → 2,914 chunks in
 **~11 minutes** on a laptop CPU (measured 10.8 min on a fresh clone; embedding runs on CPU).
 Pages become searchable one by one as they are stored, so you can continue with step 3 now.
 Follow progress with `docker logs -f rag-ingest` (Ctrl+C stops following, not the ingest).
@@ -313,7 +313,7 @@ time can't race each other.
 ## Tests, eval and benchmarks
 
 ```bash
-docker compose run --rm tests                      # 78 tests, ~1.5 min (uses a separate rag_test DB)
+docker compose run --rm tests                      # 82 tests, ~2 min (uses a separate rag_test DB)
 docker compose run --rm --entrypoint python mcp-server scripts/eval_retrieval.py   # retrieval eval
 docker compose run --rm --entrypoint python mcp-server scripts/benchmark.py latency  # or: concurrency | ingest | scale
 ```
@@ -352,7 +352,7 @@ Benchmarked on a local laptop environment (**Docker VM: 8 vCPUs / 3.7 GiB RAM**)
 
 | Scenario | Scale | Time / throughput | Key takeaway |
 | :--- | :--- | :--- | :--- |
-| **Initial ingest** | 814 pages (2,907 chunks) | ~11.5 min (~5 chunks/s) | CPU-bound embedding generation. |
+| **Initial ingest** | 814 pages (2,914 chunks) | ~11.5 min (~5 chunks/s) | CPU-bound embedding generation. |
 | **Re-ingest (unchanged)** | 814 pages | **12 seconds** | Fast hash-based idempotency skip. |
 
 ### Search performance (standard corpus)

@@ -143,6 +143,9 @@ _ROLE = re.compile(r":[\w:+.-]+:`([^`]*)`")
 _LINK_WITH_TARGET = re.compile(r"`([^`<]+?)\s*<[^`>]+>`__?")
 _LINK = re.compile(r"`([^`]+)`__?")
 _LITERAL = re.compile(r"``(.+?)``")
+# Source typo seen in the devportal: `top`` (one backtick to open, two to close).
+# One word only: anything longer would pair the end of a link with a real ``literal``.
+_HALF_LITERAL = re.compile(r"(?<![`\w])`([^`\s]+)``(?![`\w])")
 _ESCAPE = re.compile(r"\\(.)")
 
 
@@ -158,6 +161,7 @@ def clean_inline(text: str, substitutions: dict[str, str]) -> str:
     """
     if substitutions:
         text = _SUBST_REF.sub(lambda m: substitutions.get(m[1], m[0]), text)
+    text = _HALF_LITERAL.sub(r"``\1``", text)
     text = _ROLE_WITH_TARGET.sub(r"\1", text)
     text = _ROLE.sub(r"\1", text)
     text = _LINK_WITH_TARGET.sub(r"\1", text)
@@ -239,6 +243,11 @@ def clean_body(text: str, substitutions: dict[str, str]) -> str:
             elif name in _CODE_DIRECTIVES:
                 out.extend(_code_fence(lines[content_start:end], arg.split()[0] if arg else ""))
                 i = end
+            elif name == "list-table":
+                if arg:
+                    out.append(clean_inline(arg, substitutions).strip())
+                out.extend(_list_table(lines[i + 1:content_start], lines[content_start:end], substitutions))
+                i = end
             else:
                 # Admonitions and containers (note, dropdown, grid, list-table, topic, ...):
                 # keep a short label and let the content flow through normal processing.
@@ -276,7 +285,75 @@ def clean_body(text: str, substitutions: dict[str, str]) -> str:
         out.append(_clean_line(line, substitutions))
         i += 1
 
-    return _squeeze_blank_lines("\n".join(out))
+    return _squeeze_blank_lines(_join_wrapped_links("\n".join(out)))
+
+
+_ROW_START = re.compile(r"^(?P<indent>[ \t]*)\*[ \t]+-(?:[ \t]+(?P<text>.*))?$")
+_CELL_START = re.compile(r"^(?P<indent>[ \t]*)-(?:[ \t]+(?P<text>.*))?$")
+
+
+def _list_table(options: list[str], body: list[str], substitutions: dict[str, str]) -> list[str]:
+    """`.. list-table::` -> one line per row, each cell labelled with its column header:
+
+        - Parameter: `admin_username` · Value Type: string · Description: Custom ...
+
+    A row stays self-contained, so it still reads correctly when a long table is
+    split across chunks (a Markdown table would lose its header row there).
+    """
+    header_rows = 0
+    for line in options:
+        m = re.match(r"^[ \t]+:header-rows:[ \t]*(\d+)", line)
+        if m:
+            header_rows = int(m[1])
+
+    rows: list[list[list[str]]] = []  # row -> cell -> lines of text
+    row_indent = 0
+    for line in body:
+        if not line.strip():
+            continue
+        row = _ROW_START.match(line)
+        cell = _CELL_START.match(line)
+        if row:
+            row_indent = len(row["indent"])
+            rows.append([[row["text"] or ""]])
+        elif cell and rows and len(cell["indent"]) == row_indent + 2:
+            rows[-1].append([cell["text"] or ""])
+        elif rows:
+            rows[-1][-1].append(line.strip())  # cell continuation, incl. nested lists
+
+    cells = [[_clean_line(" ".join(part for part in cell if part), substitutions) for cell in row]
+             for row in rows]
+    headers = cells[header_rows - 1] if 0 < header_rows <= len(cells) else []
+    out = []
+    for row in cells[header_rows:]:
+        parts = [f"{headers[n]}: {text}" if n < len(headers) and headers[n] else text
+                 for n, text in enumerate(row) if text]
+        if parts:
+            out.append("- " + " · ".join(parts))
+    return out
+
+
+def _join_wrapped_links(text: str) -> str:
+    """Clean links and roles that wrap onto a second line, e.g.
+
+        the `Aiven
+        Client <https://github.com/aiven/aiven-client>`__ .
+
+    clean_inline works per line and never sees them whole. Applied per paragraph
+    and outside code fences, so a stray backtick cannot pair with a far-away link.
+    """
+    def clean(paragraph: str) -> str:
+        if "\n" not in paragraph:
+            return paragraph
+        one_line = lambda m: re.sub(r"\s*\n\s*", " ", m[1])
+        paragraph = _ROLE_WITH_TARGET.sub(one_line, paragraph)
+        return _LINK_WITH_TARGET.sub(one_line, paragraph)
+
+    parts = re.split(r"(^```.*?^```[ \t]*$)", text, flags=re.M | re.S)
+    return "".join(
+        part if part.startswith("```") else "\n\n".join(clean(p) for p in part.split("\n\n"))
+        for part in parts
+    )
 
 
 def _clean_line(line: str, substitutions: dict[str, str]) -> str:

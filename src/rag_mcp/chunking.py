@@ -21,7 +21,7 @@ from rag_mcp.tokens import TokenCounter
 
 # Part of the content hash: bump it whenever chunking output changes, so
 # re-ingesting re-chunks and re-embeds instead of skipping "unchanged" sources.
-CHUNKER_VERSION = "1"
+CHUNKER_VERSION = "2"
 
 _SPECIAL_TOKENS = 2  # [CLS] and [SEP], added by the model on top of our text
 
