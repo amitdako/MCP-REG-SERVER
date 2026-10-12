@@ -50,4 +50,4 @@ RUN pip install -r requirements-dev.txt
 COPY tests/ ./tests/
 USER app
 ENTRYPOINT ["python", "-m", "pytest"]
-CMD ["-q", "-p", "no:cacheprovider"]
+CMD ["-q"]
