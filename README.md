@@ -23,21 +23,19 @@ GitHub repo.
 ≥ 4 GB RAM for Docker, and the [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code)
 CLI (`npm install -g @anthropic-ai/claude-code`). No API keys.
 
-### 1. Clone, build, start the database
+### 1. Clone and build
 
 ```bash
 git clone https://github.com/amitdako/MCP-REG-SERVER.git
 cd MCP-REG-SERVER
 docker compose build mcp-server
-docker compose up -d db
 ```
 
 The first build downloads CPU-only PyTorch and bakes the embedding model into the image
-(measured on a fresh clone without cache: **~5.5 min**; later builds take seconds). The database schema is created automatically when the server first
-starts (see [Database schema & initialization](#database-schema--initialization)).
-
-> **Troubleshooting:** *Port 5433 already in use* means another Postgres is using that port. Start
-> the database on a different one: `DB_PORT=5434 docker compose up -d db`.
+(measured on a fresh clone without cache: **~5.5 min**; later builds take seconds). There is no
+separate database step: every `docker compose run ... mcp-server` command starts Postgres
+first if it isn't running, and the server creates the schema automatically (see
+[Database schema & initialization](#database-schema--initialization)).
 
 ### 2. Start ingesting the Aiven docs (runs in the background)
 
@@ -50,9 +48,18 @@ This clones the repo and ingests all its Markdown/RST pages: 814 pages → 2,914
 Pages become searchable one by one as they are stored, so you can continue with step 3 now.
 Follow progress with `docker logs -f rag-ingest` (Ctrl+C stops following, not the ingest).
 
+This first `run` also starts the database (Postgres + pgvector, data in the `pgdata` volume).
+
 > **Troubleshooting:** *Conflict. The container name "/rag-ingest" is already in use* means a
 > previous ingest container still exists. Remove it with `docker rm rag-ingest`, then run the
 > command again.
+
+> **Troubleshooting:** *Port 5433 already in use* (or *port is already allocated*) means another
+> Postgres is using that port. Pick another one in a `.env` file next to `docker-compose.yml`,
+> then run the command again: `echo DB_PORT=5434 > .env`. Use the file rather than
+> `DB_PORT=5434 docker compose ...` on one command: Compose reads `.env` for every command,
+> including the one Claude runs, while a port set on one command only would make the next
+> command recreate the database on 5433.
 
 ### 3. Add the server to Claude
 
@@ -394,8 +401,8 @@ Benchmarked on a local laptop environment (**Docker VM: 8 vCPUs / 3.7 GiB RAM**)
   server itself, so it can't be a long-running `docker compose up` service (it sits under a
   compose profile, and `docker compose up` alone starts only Postgres). The one command is the
   MCP config's `docker compose run --rm -T mcp-server`: through `depends_on` it also creates the
-  volume, starts Postgres, waits for its healthcheck, and the server creates the schema. Step 1's
-  `docker compose up -d db` only starts the database early so the ingest can run first.
+  volume, starts Postgres, waits for its healthcheck, and the server creates the schema. The
+  quickstart's ingest command (step 2) starts the database the same way.
 
 ## Known limitations & trade-offs
 
@@ -513,7 +520,7 @@ and calls the `rag-docs` tools itself.
 
 | Error or symptom | Where it's explained |
 |---|---|
-| `Port 5433 already in use` | [Quickstart step 1](#1-clone-build-start-the-database) |
+| `Port 5433 already in use` | [Quickstart step 2](#2-start-ingesting-the-aiven-docs-runs-in-the-background) |
 | `Conflict. The container name "/rag-ingest" is already in use` | [Quickstart step 2](#2-start-ingesting-the-aiven-docs-runs-in-the-background) |
 | `claude: command not found` | [Quickstart step 3](#3-add-the-server-to-claude) |
 | `rag-docs` not listed in Claude Code | [Quickstart step 3](#3-add-the-server-to-claude) |
