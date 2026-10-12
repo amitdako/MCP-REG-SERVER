@@ -56,6 +56,7 @@ no setup.
 2. Start Claude Code: `claude`
 3. Approve the **`rag-docs`** server when prompted. (`/mcp` now lists `rag-docs` as connected,
    with 5 tools.)
+<img width="918" height="253" alt="image" src="https://github.com/user-attachments/assets/94d8bb46-faf1-4a8f-abb8-ed6549ae0c5c" />
 
 ### 4. Query the server (test)
 
