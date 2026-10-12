@@ -17,7 +17,7 @@ GitHub repo.
 
 ---
 
-## Quickstart (about 10 minutes)
+## Quickstart (server ready in Claude in ~7 minutes)
 
 **You need:** Docker with Compose v2 (Docker Desktop on Mac/Windows), git, ~4 GB free disk,
 ≥ 4 GB RAM for Docker, and the [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code)
@@ -32,7 +32,7 @@ docker compose build mcp-server
 ```
 
 The first build downloads CPU-only PyTorch and bakes the embedding model into the image
-(measured on a fresh clone without cache: **~5.5 min**; later builds take seconds). There is no
+(measured on a fresh clone without cache: **~6 min**; later builds take seconds). There is no
 separate database step: every `docker compose run ... mcp-server` command starts Postgres
 first if it isn't running, and the server creates the schema automatically (see
 [Database schema & initialization](#database-schema--initialization)).
@@ -44,7 +44,7 @@ docker compose run -d --name rag-ingest mcp-server ingest https://github.com/aiv
 ```
 
 This clones the repo and ingests all its Markdown/RST pages: 814 pages → 2,914 chunks in
-**~11 minutes** on a laptop CPU (measured 10.8 min on a fresh clone; embedding runs on CPU).
+**~11–15 minutes** on a laptop CPU (measured 10.8–14.4 min on fresh clones; embedding runs on CPU).
 Pages become searchable one by one as they are stored, so you can continue with step 3 now.
 Follow progress with `docker logs -f rag-ingest` (Ctrl+C stops following, not the ingest).
 
@@ -101,7 +101,8 @@ Once the ingest from step 2 has finished (`docker logs rag-ingest` ends with a s
 
 Claude calls the server's `search` tool over stdio, gets the matching chunk from
 `idle-connections.rst`, and answers **180 seconds**, citing the page's GitHub URL. The first search
-of a session takes about 15 s while the embedding model loads; after that, searches take ~0.1 s.
+of a session takes 15–20 s while the embedding model loads (up to ~45 s if the step 2 ingest is
+still running, since both use the CPU); after that, searches take ~0.1 s.
 More questions and real tool output: [Search](#search).
 
 > **Troubleshooting:** if the answer doesn't cite the expected page, the ingest from step 2 is
@@ -372,7 +373,7 @@ Benchmarked on a local laptop environment (**Docker VM: 8 vCPUs / 3.7 GiB RAM**)
 
 | Scenario | Scale | Time / throughput | Key takeaway |
 | :--- | :--- | :--- | :--- |
-| **Initial ingest** | 814 pages (2,914 chunks) | ~11.5 min (~5 chunks/s) | CPU-bound embedding generation. |
+| **Initial ingest** | 814 pages (2,914 chunks) | ~11–15 min (~5 chunks/s) | CPU-bound embedding generation. |
 | **Re-ingest (unchanged)** | 814 pages | **12 seconds** | Fast hash-based idempotency skip. |
 
 ### Search performance (standard corpus)
@@ -412,8 +413,8 @@ Benchmarked on a local laptop environment (**Docker VM: 8 vCPUs / 3.7 GiB RAM**)
 * **In-memory job state:** background ingest jobs are bound to the active session's server process.
   If the session ends mid-job, re-running the same ingest resumes the work, skipping files that
   are already stored via hash comparison.
-* **Cold start latency:** the first query of a new session waits ~10–15 s while the embedding
-  model loads into memory. Later queries take ~40 ms median (p95 70 ms).
+* **Cold start latency:** the first query of a new session waits ~15–20 s while the embedding
+  model loads into memory (up to ~45 s while an ingest is using the CPU). Later queries take ~40 ms median (p95 70 ms).
 * **Keyword search scaling:** keyword scoring computes its IDF weights per query, so its cost grows
   roughly linearly with corpus size: 6 ms → 102 ms → 512 ms p50 at 1× / 10× / 50× (145,000
   chunks), while vector search stays ~2 ms. The fix is precomputed term statistics or a BM25 index.
