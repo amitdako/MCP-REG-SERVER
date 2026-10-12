@@ -34,7 +34,7 @@ docker compose up -d db
 
 The first build downloads CPU-only PyTorch and bakes the embedding model into the image
 (measured on a fresh clone without cache: **~5.5 min**; later builds take seconds). The database schema is created automatically when the server first
-starts (see [How the schema is created](#how-the-schema-is-created)).
+starts (see [Database schema & initialization](#database-schema--initialization)).
 
 ### 2. Start ingesting the Aiven docs (runs in the background)
 
@@ -253,17 +253,28 @@ data volume, and the next server start recreates an empty schema.
 
 ---
 
-## How the schema is created
+## Database schema & initialization
 
-There is no manual step. On every start the server runs [`schema.sql`](src/rag_mcp/schema.sql)
-idempotently (`CREATE EXTENSION/TABLE/INDEX IF NOT EXISTS`, under a Postgres advisory lock),
-so it works on a fresh volume and on an existing one. You can also run it explicitly:
-`docker compose run --rm mcp-server init-db`.
+Database initialization is automatic and idempotent. On every start, the server runs
+[`schema.sql`](src/rag_mcp/schema.sql) under a Postgres advisory lock with `IF NOT EXISTS` guards,
+so it works on a fresh volume and on an existing database, and two servers starting at the same
+time can't race each other.
 
-Tables: `sources` (one row per document: URI, type, title, content hash, counts) and
-`document_chunks` (text, breadcrumb-enriched embedding input, `vector(384)`, generated
-`tsvector`), with an HNSW index (cosine) and a GIN full-text index. Data lives in the
-`pgdata` Docker volume and survives restarts; `docker compose down -v` deletes it.
+* **Automatic setup:** no manual database step is needed. To run the schema step on its own (it
+  only creates what is missing and never deletes data):
+  ```bash
+  docker compose run --rm mcp-server init-db
+  ```
+* **Tables:** `sources` (one row per document: URI, type, title, content hash, chunk and token
+  counts) and `document_chunks` (chunk text, the breadcrumb-enriched text that gets embedded, a
+  `vector(384)` embedding and a generated `tsvector` for keyword search).
+* **Indexes:** HNSW (cosine) on the embeddings, GIN on the `tsvector`, and one on `source_id` for
+  fast cascading deletes.
+* **Safety check:** startup stops with a clear message if the configured embedding model's
+  dimension doesn't match the existing `vector` column (for example, after switching models on an
+  old volume).
+* **Persistence:** data lives in the `pgdata` Docker volume and survives restarts and rebuilds.
+  `docker compose down -v` deletes it.
 
 ## Configuration
 
