@@ -74,24 +74,37 @@ More questions and real tool output: [Search](#search).
 
 ## Search
 
-`search(query, top_k=5, source_filter?)` runs **hybrid retrieval**: a vector search (semantic
-similarity, HNSW index) and a keyword search (exact terms, with rare terms weighted higher by IDF),
-merged with Reciprocal Rank Fusion. Exact parameter names like `tcp_keepalives_idle` and
-paraphrased questions both work.
+**You don't call `search` yourself.** Ask Claude a question in plain language, for example
+*"What is the default tcp_keepalives_idle for PostgreSQL?"*, and Claude invokes the `search` MCP
+tool behind the scenes, reads the returned chunks, and answers with the source cited. Calling
+`search(...)` explicitly is optional, for when you want to control the parameters.
 
-| Parameter | Default | Meaning |
-|---|---|---|
-| `query` | required | The question or keywords. Exact product and parameter names help. |
-| `top_k` | `5` | Number of chunks returned (1–20). |
-| `source_filter` | none | Keep only sources whose URI contains this text (case-insensitive), e.g. `"products/kafka"` or `"/data"`. |
+Under the hood, each search runs a **vector search** (meaning, so paraphrases work) and a
+**keyword search** (exact terms like `tcp_keepalives_idle`, with rare terms weighted higher), and
+merges the two rankings with Reciprocal Rank Fusion.
 
-Each result shows `[rank] Page > Section`, the `source:` URL to cite, a score line with the
-chunk's rank on each side, and the chunk text. The examples below are real output on the
-devportal corpus (trimmed).
+| Parameter | Required | Default | Meaning |
+|---|---|---|---|
+| `query` | **yes** | — | The question or keywords. |
+| `top_k` | no | `5` | How many chunks to return (1–20). |
+| `source_filter` | no | none | Only search sources whose URI contains this text, e.g. `"products/kafka"` or `"/data"`. |
 
-### Example: a configuration parameter
+### Example 1: a technical parameter
 
-> What is the default tcp_keepalives_idle for Aiven for PostgreSQL?
+- **Question:** *"What is the default tcp_keepalives_idle for Aiven for PostgreSQL?"*
+- **Retrieved context:** [`idle-connections.rst`](https://github.com/aiven/devportal/blob/main/docs/products/postgresql/reference/idle-connections.rst),
+  section *Keep-alive server side parameters* (vector rank #1, keyword rank #1)
+- **Answer:** `180` seconds.
+
+### Example 2: a calculation from a rule
+
+- **Question:** *"How many static IP addresses do I need for a 9 node plan?"*
+- **Retrieved context:** [`static-ip-addresses.rst`](https://github.com/aiven/devportal/blob/main/docs/platform/howto/static-ip-addresses.rst),
+  section *Calculate the number of IP addresses needed* (vector rank #1, keyword rank #1)
+- **Answer:** `15` static IPs (9 nodes + 6, the rule for plans above 6 nodes).
+
+<details>
+<summary>What the <code>search</code> tool actually returns to Claude (Example 1, trimmed)</summary>
 
 ```
 [1] Keep-alive connections parameters
@@ -105,26 +118,21 @@ score: 0.0328 (vector #1, keyword #1)
 ...
 ```
 
-**Answer:** 180 seconds, citing `idle-connections.rst`.
+Each result has a breadcrumb (`Page > Section`), the source URL to cite, the chunk's rank on
+each side of the hybrid search, and the chunk text.
+</details>
 
-### Example: a limit, asked in your own words
+### Questions to try
 
-> How many static IP addresses do I need for a 9 node plan?
+Each of these was checked against the ingested corpus; the first result comes from the page listed:
 
-```
-[1] Manage static IP addresses
-source: https://github.com/aiven/devportal/blob/main/docs/platform/howto/static-ip-addresses.rst
-score: 0.0328 (vector #1, keyword #1)
-...
-* - 6+ nodes
-- number of nodes + 6
-- 9 node plan needs 15 static IP addresses (9 nodes, plus 6)
-```
-
-**Answer:** 15 static IPs (9 nodes + 6), citing `static-ip-addresses.rst`.
-
-More to try: *"How do I enable automatic topic creation in Kafka?"*,
-*"What does auto_create_topics_enable do?"*, *"How often does Aiven for ClickHouse take backups?"*
+| Question | Expected source |
+|---|---|
+| How do I enable automatic topic creation in Kafka? | `create-topics-automatically.rst` |
+| What does auto_create_topics_enable do? | `create-topics-automatically.rst` (the parameter is also in `kafka/reference/advanced-params.rst`) |
+| How often does Aiven for ClickHouse take backups? | `platform/concepts/service_backups.rst` (daily, retention by plan) |
+| How many connections per GiB of RAM does Aiven for MySQL allow? | `mysql/concepts/max-number-of-connections.rst` |
+| What minimum monthly spend is required for Bring Your Own Cloud? | `platform/concepts/byoc.rst` |
 
 ## Ingesting content
 
