@@ -50,8 +50,14 @@ Follow progress with `docker logs -f rag-ingest` (Ctrl+C stops following, not th
 
 This first `run` also starts the database (Postgres + pgvector, data in the `pgdata` volume).
 
+This ingest runs outside Claude, in its own container, so Claude's `ingest_status` tool won't
+list it: that tool only tracks ingests started from Claude. To follow it from Claude, ask
+*"How many sources are ingested?"*; the count grows as pages are stored.
+
 > **Troubleshooting:** *Conflict. The container name "/rag-ingest" is already in use* means a
-> previous ingest container still exists. Remove it with `docker rm rag-ingest`, then run the
+> container with that name exists. First check `docker ps`: if `rag-ingest` is listed there, your
+> ingest is still running, so just wait (don't run the command again). If it's not listed, it's a
+> finished ingest from an earlier run: remove it with `docker rm rag-ingest`, then run the
 > command again.
 
 > **Troubleshooting:** *Port 5433 already in use* (or *port is already allocated*) means another
@@ -86,6 +92,11 @@ no setup. This is the whole config, in case you want to paste it into another pr
 <img width="918" height="253" alt="image" src="https://github.com/user-attachments/assets/94d8bb46-faf1-4a8f-abb8-ed6549ae0c5c" />
 
 Prefer a visual desktop app over the terminal? Use the [Claude Desktop App](#claude-desktop-app) setup instead.
+
+Skipped step 2? You can ingest from Claude instead: ask *"Ingest https://github.com/aiven/devportal"*.
+It runs as a background job that `ingest_status` tracks, but it stops if you close the Claude
+session before it finishes (asking again resumes it, skipping the pages already stored). Don't
+start it while the step 2 ingest is still running: both would do the same work.
 
 > **Troubleshooting:** *`claude: command not found`* means the Claude Code CLI isn't installed or
 > isn't on your `PATH`: `npm install -g @anthropic-ai/claude-code`. If **`rag-docs` isn't listed**,
