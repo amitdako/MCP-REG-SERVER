@@ -1,4 +1,8 @@
-"""Minimal Markdown section splitter (ATX `#` headings, fenced code aware)."""
+"""Minimal Markdown section splitter (ATX `#` headings, fenced code aware).
+
+Changing what this module outputs changes the chunks: bump CHUNKER_VERSION in
+chunking.py, or re-ingesting skips every page as "unchanged" (same file hash).
+"""
 
 from __future__ import annotations
 

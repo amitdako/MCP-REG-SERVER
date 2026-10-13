@@ -4,6 +4,9 @@ We deliberately do not use docutils: the devportal uses Sphinx-only directives
 and roles (grid, dropdown, :doc:, :bdg-secondary:, ...) that plain docutils
 rejects. We only need two things from RST: where the headings are, and clean
 readable text. Both are handled with small, well-tested heuristics.
+
+Changing what this module outputs changes the chunks: bump CHUNKER_VERSION in
+chunking.py, or re-ingesting skips every page as "unchanged" (same file hash).
 """
 
 from __future__ import annotations

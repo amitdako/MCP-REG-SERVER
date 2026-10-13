@@ -88,6 +88,9 @@ def build_server(service: RagService) -> MCPServer:
         try:
             if url:
                 ref = loaders.parse_github_url(url)
+                # Repos and directories are routed here, before loaders.resolve (which also
+                # handles them): resolve would clone/scan inside this call, the job does it
+                # on its worker thread so the tool returns at once.
                 if ref and ref.kind != "blob":
                     return _start_job(service, f"GitHub {url}", lambda: loaders.from_github(ref))
             if path and Path(path).expanduser().is_dir():
